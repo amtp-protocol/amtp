@@ -611,9 +611,37 @@ rules:
 └─────────────────┴─────────────────┴─────────────────────────┘
 ```
 
-### 10.2 Configuration
+### 10.2 Delivery to Local Agents
 
-#### 10.2.1 Gateway Configuration File
+When an AMTP gateway receives a message for an address in its own domain
+(e.g., `orders@receiver.com`), it is responsible for delivery to the local
+agent identified by the local-part. AMTP Core does not prescribe how this
+delivery is implemented; each domain is free to choose.
+
+Gateways MAY deliver messages using one or both of the following models:
+
+- **Push Model:** The gateway invokes a registered delivery target for the
+  local-part, such as an HTTPS webhook, gRPC service, or internal worker queue.
+  If the target is temporarily unavailable, the gateway MAY retry delivery
+  according to its durability policy.
+
+- **Pull Model:** The gateway buffers messages internally and exposes them
+  through a retrieval API (e.g., `GET /v1/inbox?recipient=...`). Agents fetch
+  messages at their convenience and acknowledge receipt. This model is useful
+  for agents that cannot expose inbound endpoints.
+
+- **Hybrid Model:** The gateway attempts push delivery when a target is
+  registered. If push fails or no target exists, the message is retained for
+  later retrieval via pull.
+
+**Normative requirement:** Regardless of delivery model, the gateway MUST
+either (a) deliver the message to a local agent, or (b) return a structured
+error such as `AGENT_UNKNOWN` if no mapping exists for the local-part.
+
+
+### 10.3 Configuration
+
+#### 10.3.1 Gateway Configuration File
 
 ```yaml
 # amtp-gateway.yaml
@@ -648,52 +676,6 @@ schemas:
 policy:
   config_file: "/etc/amtp/policy.yaml"
   default_action: "allow"
-```
-
-### 10.3 Database Schema
-
-#### 10.3.1 Messages Table
-
-```sql
-CREATE TABLE messages (
-    message_id VARCHAR(26) PRIMARY KEY,
-    idempotency_key UUID UNIQUE NOT NULL,
-    sender VARCHAR(255) NOT NULL,
-    recipients JSONB NOT NULL,
-    subject TEXT,
-    schema_id VARCHAR(255),
-    payload JSONB,
-    headers JSONB,
-    coordination JSONB,
-    status VARCHAR(50) NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    retry_count INTEGER DEFAULT 0,
-    next_retry_at TIMESTAMP WITH TIME ZONE,
-    delivered_at TIMESTAMP WITH TIME ZONE,
-    INDEX idx_status_next_retry (status, next_retry_at),
-    INDEX idx_idempotency_key (idempotency_key),
-    INDEX idx_sender (sender),
-    INDEX idx_created_at (created_at)
-);
-```
-
-#### 10.3.2 Delivery Attempts Table
-
-```sql
-CREATE TABLE delivery_attempts (
-    id SERIAL PRIMARY KEY,
-    message_id VARCHAR(26) REFERENCES messages(message_id),
-    recipient VARCHAR(255) NOT NULL,
-    attempt_number INTEGER NOT NULL,
-    status VARCHAR(50) NOT NULL,
-    error_code VARCHAR(100),
-    error_message TEXT,
-    attempted_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    response_time_ms INTEGER,
-    INDEX idx_message_recipient (message_id, recipient),
-    INDEX idx_attempted_at (attempted_at)
-);
 ```
 
 ---
