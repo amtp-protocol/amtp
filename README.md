@@ -123,30 +123,39 @@ The `gateway` parameter in the DNS TXT record specifies the HTTPS endpoint for A
 - Accept HTTP POST requests to `/v1/messages`
 - Support HTTP/2 for improved performance
 
-### 3.4 Well-Known HTTPS Discovery
+### 3.4 Agent Discovery
 
+After discovering the gateway via DNS TXT records, clients can discover available agents for a domain:
 
-In addition to DNS, domains MAY publish a `.well-known` resource for richer metadata:
+**Endpoint:** `GET https://{gateway}/v1/discovery/agents`
 
-
-**Endpoint:** `GET https://{domain}/.well-known/amtp`
-
+**Query Parameters:**
+- `delivery_mode` (optional): Filter agents by delivery mode (`pull` or `push`)
+- `active_only` (optional): Only return agents active within the last 30 days (`true` or `false`)
 
 **Response Example:**
 ```json
 {
-"gateway": "https://amtp.example.com",
-"versions": ["1.0"],
-"features": ["workflow","schema-validated"],
-"schemas": ["agntcy:commerce.*","agntcy:finance.payment.*"],
-"max_size": 10485760,
-"auth": ["mtls","oauth"],
-"jwks": "https://amtp.example.com/.well-known/jwks.json"
+  "agents": [
+    {
+      "address": "sales@example.com",
+      "delivery_mode": "pull",
+      "last_active": "2024-01-15T10:30:00Z"
+    },
+    {
+      "address": "support@example.com", 
+      "delivery_mode": "push",
+      "webhook_url": "https://example.com/webhooks/amtp",
+      "last_active": "2024-01-15T14:22:00Z"
+    }
+  ],
+  "agent_count": 2,
+  "domain": "example.com",
+  "timestamp": "2024-01-15T15:00:00Z"
 }
 ```
 
-
-If both DNS TXT and `.well-known` are present, `.well-known` information SHOULD take precedence and MAY augment the DNS record. Clients SHOULD cache responses with standard HTTP caching headers.
+Clients SHOULD cache agent discovery responses appropriately to reduce load on gateways.
 
 ---
 
@@ -644,7 +653,7 @@ error such as `AGENT_UNKNOWN` if no mapping exists for the local-part.
 #### 10.3.1 Gateway Configuration File
 
 ```yaml
-# amtp-gateway.yaml
+# gateway.yaml
 version: "1.0"
 gateway:
   bind_address: "0.0.0.0:443"
