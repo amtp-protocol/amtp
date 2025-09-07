@@ -1,3 +1,5 @@
+![AMTP Project Logo](logo.png)
+
 # AMTP Protocol Specification v1.0
 
 ## Table of Contents
@@ -1318,102 +1320,6 @@ class WorkflowCoordinator:
     
     def on_workflow_complete(self, workflow_id, workflow):
         print(f"Workflow {workflow_id} completed with {len(workflow['responses'])} responses")
-```
-
-## Appendix D: Performance Tuning
-
-### D.1 Gateway Optimization
-
-#### D.1.1 Message Processing
-
-```yaml
-# amtp-performance.yaml
-performance:
-  http_server:
-    max_connections: 10000
-    keep_alive_timeout: 30s
-    read_timeout: 30s
-    write_timeout: 30s
-    
-  message_queue:
-    batch_size: 100
-    max_workers: 50
-    worker_timeout: 60s
-    prefetch_count: 10
-    
-  database:
-    connection_pool_size: 50
-    max_idle_connections: 10
-    connection_max_lifetime: 1h
-    
-  retry_logic:
-    initial_delay: 1s
-    max_delay: 1h
-    max_attempts: 168
-    jitter_percent: 25
-```
-
-#### D.1.2 Monitoring Metrics
-
-```prometheus
-# Key metrics to monitor
-amtp_messages_received_total{status="success|error"}
-amtp_messages_sent_total{status="success|error"}
-amtp_delivery_latency_seconds{percentile="50|95|99"}
-amtp_queue_depth{queue="outbound|inbound|dlq"}
-amtp_retry_attempts_total{reason="timeout|error|unavailable"}
-amtp_active_workflows_total
-amtp_schema_validation_errors_total{schema="*"}
-```
-
-## Appendix E: Migration Strategies
-
-### E.1 Gradual AMTP Adoption
-
-#### E.1.1 Phase 1: Gateway Deployment
-
-1. Deploy AMTP gateway alongside existing email infrastructure
-2. Configure DNS TXT records for AMTP capability advertisement
-3. Enable SMTP bridge for backward compatibility
-4. Monitor gateway health and message flow
-
-#### E.1.2 Phase 2: Agent Integration
-
-1. Update critical agents to use AMTP API
-2. Enable schema validation for structured messages
-3. Implement coordination for multi-step workflows
-4. Measure performance improvements
-
-#### E.1.3 Phase 3: Partner Onboarding
-
-1. Share AMTP capabilities with key partners
-2. Provide integration documentation and SDKs
-3. Establish schema standards for common workflows
-4. Monitor cross-organization message flow
-
-### E.2 Legacy System Integration
-
-#### E.2.1 Email Bridge Configuration
-
-```yaml
-# smtp-bridge.yaml
-smtp_bridge:
-  enabled: true
-  inbound:
-    smtp_server: "localhost:587"
-    username: "amtp-bridge"
-    password: "${SMTP_PASSWORD}"
-    
-  outbound:
-    smtp_server: "smtp.company.com:587"
-    from_address: "amtp-bridge@company.com"
-    auth_method: "plain"
-    
-  conversion:
-    include_json_payload: true
-    human_readable_summary: true
-    preserve_headers: true
-    attachment_handling: "url_reference"
 ```
 
 ---
