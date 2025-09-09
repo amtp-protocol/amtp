@@ -1,6 +1,6 @@
 ![AMTP Project Logo](logo.png)
 
-# AMTP Protocol Specification v1.0
+# AMTP Protocol Specification v1.0 (Draft)
 
 ## Table of Contents
 
@@ -255,22 +255,34 @@ AMTP messages use JSON format with the following structure:
 
 ### 4.2 Field Specifications
 
-#### 4.2.1 Required Fields
+#### 4.2.1 Core Required Fields
 
-- **`version`**: AMTP protocol version (string)
-- **`message_id`**: UUIDv7 for time-ordered unique identification
-- **`idempotency_key`**: UUIDv4 for duplicate detection
-- **`timestamp`**: ISO 8601 UTC timestamp
+The following fields are MANDATORY for all AMTP implementations and ensure basic interoperability:
+
+- **`version`**: AMTP protocol version (string, e.g., "1.0")
 - **`sender`**: Sender address in `agent@domain` format
 - **`recipients`**: Array of recipient addresses
+- **`payload`**: Message content (any valid JSON object or primitive)
 
-#### 4.2.2 Optional Fields
+#### 4.2.2 Implementation-Defined Fields (Optional)
 
+The following fields MAY be implemented based on specific requirements and use cases:
+
+**Reliability & Tracking:**
+- **`message_id`**: UUIDv7 for time-ordered unique identification (recommended for message tracking)
+- **`idempotency_key`**: UUIDv4 for duplicate detection (required for at-least-once delivery semantics)
+- **`timestamp`**: ISO 8601 UTC timestamp (may be added by gateways)
+
+**Message Metadata:**
 - **`subject`**: Human-readable message summary
-- **`schema`**: AGNTCY schema identifier for payload validation
+- **`headers`**: Additional custom metadata
+- **`in_reply_to`**: Reference to original message for responses
+
+**Schema & Validation:**
+- **`schema`**: Schema identifier for payload validation (e.g., "agntcy:commerce.order.v2")
+
+**Advanced Features:**
 - **`coordination`**: Multi-agent workflow configuration
-- **`headers`**: Additional metadata
-- **`payload`**: Message content (validated against schema if specified)
 - **`attachments`**: External file references
 - **`signature`**: Digital signature for non-repudiation
 
@@ -806,6 +818,7 @@ Process incoming emails and attempt AMTP delivery:
 **Request Body:**
 ```json
 {
+  "version": "1.0",
   "sender": "agent@sender.com",
   "recipients": ["agent@receiver.com"],
   "subject": "Test Message",
@@ -1041,21 +1054,33 @@ Agents register endpoints to receive AMTP messages:
 #### 14.1.1 Core Conformance
 
 Implementations MUST support:
-- DNS discovery mechanism
-- Basic message format and validation
+- DNS discovery mechanism (`_amtp.{domain}` TXT records)
+- Core message format with mandatory fields: `version`, `sender`, `recipients`, `payload`
 - HTTPS transport with TLS 1.3
-- Immediate Path
+- Basic message delivery (Immediate Path)
+- JSON message format validation
 
 #### 14.1.2 Extended Conformance
 
 Implementations MAY support:
-- Durable Path with at-least-once delivery semantics
+
+**Reliability Features:**
+- Message tracking (`message_id` field)
+- At-least-once delivery semantics (`idempotency_key` field)
+- Durable Path with persistent storage
+- Message status tracking and retry logic
+
+**Integration Features:**
 - SMTP fallback capability
-- AGNTCY schema integration
-- Multi-agent coordination
-- Digital signatures
+- Schema validation (AGNTCY or custom frameworks)
+- Agent discovery endpoints
+
+**Advanced Features:**
+- Multi-agent coordination workflows
+- Digital signatures and message integrity
 - End-to-end encryption
 - Webhook notifications
+- Custom headers and metadata
 
 ### 14.2 Testing and Validation
 
@@ -1105,7 +1130,20 @@ Standard test suite for validating AMTP implementations:
 
 ## Appendix A: Message Examples
 
-### A.1 Simple Message
+### A.1 Minimal Core Message
+
+```json
+{
+  "version": "1.0",
+  "sender": "assistant@company.com",
+  "recipients": ["customer-service@client.com"],
+  "payload": {
+    "message": "Hello, this is a minimal AMTP message"
+  }
+}
+```
+
+### A.2 Simple Message with Optional Fields
 
 ```json
 {
@@ -1123,7 +1161,7 @@ Standard test suite for validating AMTP implementations:
 }
 ```
 
-### A.2 Schema-Validated Commerce Message
+### A.3 Schema-Validated Commerce Message
 
 ```json
 {
@@ -1177,7 +1215,7 @@ Standard test suite for validating AMTP implementations:
 }
 ```
 
-### A.3 Multi-Agent Coordination Message
+### A.4 Multi-Agent Coordination Message
 
 ```json
 {
@@ -1239,7 +1277,7 @@ Standard test suite for validating AMTP implementations:
 }
 ```
 
-### A.4 Workflow Response Message
+### A.5 Workflow Response Message
 
 ```json
 {
