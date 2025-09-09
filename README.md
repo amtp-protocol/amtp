@@ -59,10 +59,9 @@ This document specifies AMTP Protocol Version 1.0. Version negotiation is handle
                         └─────────────────┘     └─────────────────┘
 ```
 
-AMTP does not mandate any particular schema system or registry.
+Messages MAY include a logical schema identifier (e.g., schema:"agntcy:commerce.order.v2"), but AMTP Core makes no assumptions about how that identifier is minted, stored, versioned, or resolved. Gateways and participants MAY validate payloads against schemas using any mechanism (or none).
 
-Messages MAY include a logical schema identifier (e.g., schema:"agntcy:commerce.order.v2"), but AMTP Core makes no assumptions about how that identifier is minted, stored, versioned, or resolved.
-Gateways and participants MAY validate payloads against schemas using any mechanism (or none).
+AMTP does not mandate any particular schema  or agent registry. Each implementation is free to choose their own registry architecture: centralized, federated, file-based, database-driven, or any other approach that meets their organizational needs.
 
 
 ### 2.2 Protocol Stack
@@ -101,13 +100,12 @@ AMTP uses the standard email address format: `local-part@domain`
 Domain operators MUST publish a DNS TXT record at `_amtp.{domain}` to advertise AMTP capabilities:
 
 ```dns
-_amtp.example.com. IN TXT "v=amtp1;gateway=https://amtp.example.com:443;schemas=agntcy:commerce.*,agntcy:finance.payment.*"
+_amtp.example.com. IN TXT "v=amtp1;gateway=https://amtp.example.com:443"
 ```
 
 **Parameters:**
 - `v`: Protocol version (required)
 - `gateway`: AMTP gateway endpoint URL (required)
-- `schemas`: Supported AGNTCY schema patterns (optional)
 - `auth`: Authentication methods (`cert`, `oauth`, `apikey`) (optional)
 - `max-size`: Maximum message size in bytes (optional, default: 10MB)
 
@@ -122,32 +120,56 @@ _amtp.example.com. IN TXT "v=amtp1;gateway=https://amtp.example.com:443;schemas=
 
 The `gateway` parameter in the DNS TXT record specifies the HTTPS endpoint for AMTP message delivery. The endpoint MUST:
 - Use HTTPS with valid TLS certificate for the domain
-- Accept HTTP POST requests to `/v1/messages`
+- Accept HTTP POST requests to `/v1/messages` and GET requests to `/v1/discovery/agents`, `/v1/inbox/*`
 - Support HTTP/2 for improved performance
 
-### 3.4 Agent Discovery
+### 3.4 Agent Discovery (Optional)
 
-After discovering the gateway via DNS TXT records, clients can discover available agents for a domain:
+Agent discovery provides flexibility for different messaging scenarios. Gateways MAY implement agent discovery endpoints to support various use cases.
+
+#### 3.4.1 Use Cases
+
+**Direct Addressing:**
+When senders already know the destination address (e.g., `sales@somecompany.com`), agent discovery is not required. Messages can be sent directly to known addresses.
+
+**True Discovery:**
+When senders need to find appropriate agents for a domain (e.g., "who handles purchase orders at company.com"), discovery enables programmatic agent selection based on capabilities, roles, or supported schemas.
+
+#### 3.4.2 Discovery Endpoint
 
 **Endpoint:** `GET https://{gateway}/v1/discovery/agents`
 
 **Query Parameters:**
+- `address` (optional): Query specific agent address for validation (e.g., `sales@example.com`)
+- `role` (optional): Filter by business role
 - `delivery_mode` (optional): Filter agents by delivery mode (`pull` or `push`)
 - `active_only` (optional): Only return agents active within the last 30 days (`true` or `false`)
+- `capability` (optional): Filter by semantic capabilities
+- `schema` (optional): Filter by supported schema patterns (e.g., `agntcy:commerce.*`)
 
-**Response Example:**
+**Response Examples:**
+
+*Full agent listing:*
 ```json
 {
   "agents": [
     {
       "address": "sales@example.com",
       "delivery_mode": "pull",
+      "capabilities": ["sales_inquiries", "product_demos"],
+      "supported_schemas": ["agntcy:commerce.inquiry.*"],
+      "role": "sales",
+      "description": "Handles sales inquiries and product demonstrations",
       "last_active": "2024-01-15T10:30:00Z"
     },
     {
       "address": "support@example.com", 
       "delivery_mode": "push",
       "webhook_url": "https://example.com/webhooks/amtp",
+      "capabilities": ["technical_support", "issue_resolution"],
+      "supported_schemas": ["agntcy:support.ticket.*"],
+      "role": "support",
+      "description": "Technical support and issue resolution",
       "last_active": "2024-01-15T14:22:00Z"
     }
   ],
@@ -157,7 +179,32 @@ After discovering the gateway via DNS TXT records, clients can discover availabl
 }
 ```
 
-Clients SHOULD cache agent discovery responses appropriately to reduce load on gateways.
+*Address validation (using `?address=sales@example.com`):*
+```json
+{
+  "agents": [
+    {
+      "address": "sales@example.com",
+      "delivery_mode": "pull",
+      "active": true,
+      "last_active": "2024-01-15T10:30:00Z"
+    }
+  ],
+  "agent_count": 1,
+  "domain": "example.com",
+  "timestamp": "2024-01-15T15:00:00Z"
+}
+```
+
+#### 3.4.3 Implementation Flexibility
+
+Gateways MAY implement discovery with different levels of detail:
+
+- **Minimal**: Address validation only
+- **Basic**: Simple agent listing without metadata
+- **Enhanced**: Rich metadata with semantic search capabilities
+
+Clients SHOULD cache discovery responses appropriately to reduce load on gateways. Discovery is entirely optional - agents can communicate effectively using only direct addressing.
 
 ---
 
@@ -237,7 +284,7 @@ AMTP messages use JSON format with the following structure:
 
 ## 5. Transport Layer
 
-### 5.1 Delivery Paths (Optional vs. Recommended)
+### 5.1 Delivery Paths
 
 AMTP Core defines delivery semantics independent of storage mechanisms. Implementations MAY choose between two paths per deployment or per message policy:
 
@@ -296,6 +343,26 @@ Authorization: Bearer {token} (if required)
 }
 ```
 
+#### 5.2.3 Inbox Management (Pull Mode)
+
+For agents using pull-based delivery, gateways provide inbox endpoints for message retrieval and acknowledgment.
+
+**Inbox Retrieval:** `GET /v1/inbox/{recipient}`
+
+Agents can retrieve pending messages from their inbox with optional filtering and pagination. Authentication is required via API key to ensure agents can only access their own messages.
+
+**Message Acknowledgment:** `DELETE /v1/inbox/{recipient}/{message_id}`
+
+After processing a message, agents acknowledge receipt to remove it from their inbox. This ensures at-least-once delivery semantics while preventing message duplication.
+
+**Security Model:**
+- Each agent requires a unique API key for inbox access
+- Agents can only access messages addressed to their own local-part
+- Acknowledged messages are permanently removed from the inbox
+- Unacknowledged messages remain available for retrieval
+
+See section 12.1.5 for detailed API specifications.
+
 ### 5.3 Store-and-Forward Architecture (Optional)
 
 #### 5.3.1 Message Queue (optional)
@@ -332,18 +399,28 @@ AMTP integrates with the AGNTCY standard schema framework for payload validation
 
 #### 6.1.2 Schema Resolution
 
+Schema resolution is **implementation-defined**. A typical flow might include:
+
 1. Parse schema identifier from message
-2. Resolve schema definition via the receiving gateway’s Schema Engine from a trusted local cache; the gateway MAY fetch from a configured AGNTCY registry to populate/refresh the cache; fetched schemas MUST be signature-verified before use
+2. Resolve schema definition via the receiving gateway's Schema Engine from a trusted local cache; the gateway MAY fetch from a configured registry (AGNTCY, internal, or other) to populate/refresh the cache; fetched schemas MUST be signature-verified before use
 3. Validate payload against schema
 4. Reject invalid messages with detailed error response
 
+The protocol does not specify registry endpoints, discovery mechanisms, or storage formats. Each implementation chooses their own schema management approach.
+
 ### 6.2 Schema Negotiation
 
-#### 6.2.1 Capability Advertisement
+#### 6.2.1 Schema Discovery
 
-Include supported schemas in DNS TXT record:
-```dns
-_amtp.example.com. IN TXT "v=amtp1;gateway=https://amtp.example.com;schemas=agntcy:commerce.*,agntcy:finance.payment.*"
+Schema discovery mechanisms are **implementation-defined**. The protocol does not mandate how agents or senders discover which schemas are supported by recipients.
+
+**Common implementation approaches may include:**
+- Agent-level advertisement through discovery endpoints
+- Out-of-band negotiation and configuration
+- Schema registries (centralized or federated)
+- Static configuration files
+- Runtime schema probing and error handling
+
 ```
 
 #### 6.2.2 Version Compatibility
@@ -637,57 +714,13 @@ Gateways MAY deliver messages using one or both of the following models:
   according to its durability policy.
 
 - **Pull Model:** The gateway buffers messages internally and exposes them
-  through a retrieval API (e.g., `GET /v1/inbox?recipient=...`). Agents fetch
+  through a retrieval API (e.g., `GET /v1/inbox/{recipient}/...`). Agents fetch
   messages at their convenience and acknowledge receipt. This model is useful
   for agents that cannot expose inbound endpoints.
-
-- **Hybrid Model:** The gateway attempts push delivery when a target is
-  registered. If push fails or no target exists, the message is retained for
-  later retrieval via pull.
 
 **Normative requirement:** Regardless of delivery model, the gateway MUST
 either (a) deliver the message to a local agent, or (b) return a structured
 error such as `AGENT_UNKNOWN` if no mapping exists for the local-part.
-
-
-### 10.3 Configuration
-
-#### 10.3.1 Gateway Configuration File
-
-```yaml
-# gateway.yaml
-version: "1.0"
-gateway:
-  bind_address: "0.0.0.0:443"
-  domain: "example.com"
-  tls:
-    cert_file: "/etc/ssl/certs/example.com.crt"
-    key_file: "/etc/ssl/private/example.com.key"
-
-storage:
-  type: "postgresql"
-  connection: "postgresql://user:pass@localhost/amtp"
-  
-message_queue:
-  max_retry_attempts: 168
-  retry_base_delay: "1s"
-  max_retry_delay: "1h"
-  dlq_retention: "30d"
-
-smtp_bridge:
-  enabled: true
-  smtp_server: "localhost:587"
-  from_address: "amtp-bridge@example.com"
-
-schemas:
-  agntcy_endpoint: "https://schemas.agntcy.org"
-  cache_ttl: "1h"
-  validation_strict: true
-
-policy:
-  config_file: "/etc/amtp/policy.yaml"
-  default_action: "allow"
-```
 
 ---
 
@@ -844,6 +877,71 @@ Configure webhooks for delivery notifications:
   "secret": "webhook-secret-key"
 }
 ```
+
+#### 12.1.5 Inbox Management (Pull Mode)
+
+For agents using pull-based message delivery, gateways provide inbox management endpoints.
+
+##### Get Inbox Messages
+
+**Endpoint:** `GET /v1/inbox/{recipient}`
+
+**Headers:**
+```http
+Authorization: Bearer {agent_api_key}
+```
+
+**Query Parameters:**
+- `limit` (optional): Number of messages to retrieve (default: 100, max: 1000)
+- `offset` (optional): Pagination offset
+- `since` (optional): Only return messages since timestamp
+- `status` (optional): Filter by message status (`unread`, `read`)
+
+**Response:**
+```json
+{
+  "messages": [
+    {
+      "message_id": "01H8X9Z2K3M4N5P6Q7R8S9T0",
+      "sender": "agent@sender.com",
+      "subject": "Process Order",
+      "schema": "agntcy:commerce.order.v2",
+      "timestamp": "2025-08-14T10:30:00.000Z",
+      "status": "unread",
+      "payload": {
+        "order_id": "12345",
+        "customer": {...},
+        "items": [...]
+      }
+    }
+  ],
+  "message_count": 1,
+  "recipient": "orders@receiver.com",
+  "has_more": false
+}
+```
+
+**Security**: Requires the agent's API key. Each agent can only access their own inbox.
+
+##### Acknowledge Message
+
+**Endpoint:** `DELETE /v1/inbox/{recipient}/{message_id}`
+
+**Headers:**
+```http
+Authorization: Bearer {agent_api_key}
+```
+
+**Response:**
+```json
+{
+  "message_id": "01H8X9Z2K3M4N5P6Q7R8S9T0",
+  "status": "acknowledged",
+  "timestamp": "2025-08-14T10:35:00.000Z"
+}
+```
+
+**Security**: Requires the agent's API key. Agents can only acknowledge messages in their own inbox.
 
 ### 12.2 Agent Integration API
 
@@ -1181,10 +1279,10 @@ Standard test suite for validating AMTP implementations:
 ; Basic AMTP support
 _amtp.example.com. 300 IN TXT "v=amtp1;gateway=https://amtp.example.com:443"
 
-; With schema capabilities
-_amtp.retailer.com. 300 IN TXT "v=amtp1;gateway=https://amtp.retailer.com;schemas=agntcy:commerce.*,agntcy:finance.payment.*"
-
 ; With authentication and size limits
+_amtp.retailer.com. 300 IN TXT "v=amtp1;gateway=https://amtp.retailer.com;auth=cert,oauth"
+
+; Enterprise configuration with custom limits
 _amtp.enterprise.com. 300 IN TXT "v=amtp1;gateway=https://amtp-gw.enterprise.com;auth=cert,oauth;max-size=50000000"
 ```
 
