@@ -433,8 +433,6 @@ Schema discovery mechanisms are **implementation-defined**. The protocol does no
 - Static configuration files
 - Runtime schema probing and error handling
 
-```
-
 #### 6.2.2 Version Compatibility
 
 - Minor version differences: Backward compatible
