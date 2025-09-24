@@ -14,7 +14,7 @@
 8. [Reliability and Delivery Guarantees](#8-reliability-and-delivery-guarantees)
 9. [Security Model](#9-security-model)
 10. [Gateway Implementation](#10-gateway-implementation)
-11. [Protocol Negotiation and Fallback](#11-protocol-negotiation-and-fallback)
+11. [Protocol Negotiation and Bridging](#11-protocol-negotiation-and-bridging)
 12. [API Specifications](#12-api-specifications)
 13. [Error Handling](#13-error-handling)
 14. [Compliance and Conformance](#14-compliance-and-conformance)
@@ -30,7 +30,7 @@ The Agent Message Transfer Protocol (AMTP) is a federated, asynchronous communic
 ### 1.2 Key Features
 
 - Universal addressing using `agent@domain` format
-- Transparent protocol upgrade with email fallback
+- Transparent protocol upgrade with SMTP bridging
 - At-least-once delivery with idempotency guarantees
 - Standard schema integration via AGNTCY framework
 - Multi-agent workflow coordination
@@ -736,7 +736,7 @@ error such as `AGENT_UNKNOWN` if no mapping exists for the local-part.
 
 ---
 
-## 11. Protocol Negotiation and Fallback
+## 11. Protocol Negotiation and Bridging
 
 ### 11.1 Discovery Process
 
@@ -746,7 +746,7 @@ flowchart TD
     B --> C{AMTP record found?}
     C -->|Yes| D[Use AMTP protocol]
     C -->|No| E[Query MX records]
-    E --> F[Use SMTP fallback]
+    E --> F[Use SMTP Bridging]
     D --> G[Send AMTP message]
     G --> H{Delivery successful?}
     H -->|Yes| I[Done]
@@ -775,7 +775,7 @@ Content-Type: multipart/mixed
 
 **Email Body:**
 ```
-This message was sent via AMTP protocol but delivered via email fallback.
+This message was sent via AMTP protocol but delivered via SMTP bridging.
 
 Original Message:
 Subject: Purchase Order Confirmation
@@ -1071,7 +1071,7 @@ Implementations MAY support:
 - Message status tracking and retry logic
 
 **Integration Features:**
-- SMTP fallback capability
+- SMTP bridging capability
 - Schema validation (AGNTCY or custom frameworks)
 - Agent discovery endpoints
 
@@ -1089,7 +1089,7 @@ Implementations MAY support:
 Standard test suite for validating AMTP implementations:
 
 1. **Basic Delivery Test**: Send message between different implementations
-2. **Fallback Test**: Verify SMTP fallback when AMTP unavailable
+2. **SMTP Bridging Test**: Verify SMTP bridging with AMTP
 3. **Schema Validation Test**: Test schema-based message validation
 4. **Coordination Test**: Multi-agent workflow execution
 5. **Error Handling Test**: Proper error reporting and retry logic
@@ -1324,10 +1324,10 @@ _amtp.retailer.com. 300 IN TXT "v=amtp1;gateway=https://amtp.retailer.com;auth=c
 _amtp.enterprise.com. 300 IN TXT "v=amtp1;gateway=https://amtp-gw.enterprise.com;auth=cert,oauth;max-size=50000000"
 ```
 
-### B.2 Fallback MX Records
+### B.2 Bridge MX Records
 
 ```dns
-; AMTP primary, SMTP fallback
+; AMTP with SMTP bridging
 _amtp.hybrid.com. 300 IN TXT "v=amtp1;gateway=https://amtp.hybrid.com"
 hybrid.com. 300 IN MX 10 mail.hybrid.com.
 ```
