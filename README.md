@@ -72,9 +72,9 @@ AMTP does not mandate any particular schema  or agent registry. Each implementat
 ├─────────────────────────────────────┤
 │         AMTP Protocol               │ ← Message Format & Coordination
 ├─────────────────────────────────────┤
-│      Transport Layer (HTTPS)       │ ← Reliable Delivery
+│      Transport Layer (HTTPS)        │ ← Reliable Delivery
 ├─────────────────────────────────────┤
-│       Discovery Layer (DNS)        │ ← Addressing & Capabilities
+│       Discovery Layer (DNS)         │ ← Addressing & Capabilities
 ├─────────────────────────────────────┤
 │         Network Layer (IP)          │ ← Standard Internet
 └─────────────────────────────────────┘
@@ -115,6 +115,44 @@ _amtp.example.com. IN TXT "v=amtp1;gateway=https://amtp.example.com:443"
 2. If AMTP record exists and is valid, use AMTP protocol
 3. Otherwise, fall back to standard MX record lookup for SMTP
 4. Cache discovery results with TTL from DNS record
+
+#### 3.2.3 Domain Signing Key Records
+
+A domain that signs outbound messages MUST publish one DNS TXT record per signing key selector at:
+
+```
+{selector}._amtpkey.{domain}
+```
+
+**Example:**
+
+```dns
+k1._amtpkey.example.com. IN TXT "v=amtpkey1;alg=ES256;p=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..."
+```
+
+**Parameters:**
+- `v`: Key record version (required, MUST be `amtpkey1`)
+- `alg`: Signature algorithm (required, `ES256` or `RS256`)
+- `p`: Public key (required, base64 (RFC 4648 standard alphabet, with padding) of the DER-encoded SubjectPublicKeyInfo structure)
+
+**Selector rules:**
+- The selector MUST be a single DNS label matching `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?` (lowercase ASCII letters, digits, hyphens; 1–63 characters; no leading/trailing hyphen).
+- The `keyid` field of a message signature (Section 4.2.2) carries the selector only — never a full domain or a multi-label name. This prevents a malicious `keyid` from steering the verifier's DNS query to an attacker-controlled zone.
+- The sender domain is normalized before comparison and DNS lookup: any trailing dot is removed and ASCII letters are lowercased. Non-ASCII (internationalized) domains are not supported by version 1.0 of this profile.
+
+**Record constraints:**
+- Each owner name MUST have exactly one valid `amtpkey1` TXT record. If the owner has zero valid key records, or more than one (e.g., during a botched rotation), verification of that key fails with `key_unavailable`/`invalid` semantics (Section 9.3.4) — a verifier MUST NOT pick one of several records at random.
+- Unknown parameters MUST be ignored, so that future extensions can add parameters without breaking older verifiers.
+
+**Key rotation:**
+- To rotate, publish the new selector's record (e.g., `k2._amtpkey.example.com`) alongside the old one, sign with the new selector, and remove the old record only after all in-flight messages signed with it have expired (bounded by the receiving gateways' idempotency window). Overlapping publication is safe because each signature names its own selector.
+- Automated rotation tooling is out of scope of this specification.
+
+**Caching:**
+- Verifiers MAY cache key records. A positive cache (record found) SHOULD be cached for a bounded TTL (e.g., 5 minutes by default; the DNS protocol does not expose authoritative TXT TTLs to all resolver APIs, so implementations use a configured value). A negative cache (no record / lookup failure) SHOULD be short (e.g., at most 30 seconds) so a newly published key becomes usable quickly.
+
+**DNSSEC:**
+- Plain DNS TXT records are only as trustworthy as the resolution path. Production deployments SHOULD enable DNSSEC on the signing domain and use a validating resolver, or otherwise ensure a trusted resolution path. See Section 9.3.6 for the security boundary of DNS-based key discovery.
 
 ### 3.3 Gateway Endpoint Resolution
 
@@ -163,7 +201,7 @@ When senders need to find appropriate agents for a domain (e.g., "who handles pu
       "last_active": "2024-01-15T10:30:00Z"
     },
     {
-      "address": "support@example.com", 
+      "address": "support@example.com",
       "delivery_mode": "push",
       "webhook_url": "https://example.com/webhooks/amtp",
       "capabilities": ["technical_support", "issue_resolution"],
@@ -247,8 +285,9 @@ AMTP messages use JSON format with the following structure:
     }
   ],
   "signature": {
-    "algorithm": "RS256",
-    "value": "base64-encoded-signature"
+    "algorithm": "ES256",
+    "keyid": "k1",
+    "value": "base64url-encoded-signature"
   }
 }
 ```
@@ -277,6 +316,7 @@ The following fields MAY be implemented based on specific requirements and use c
 - **`subject`**: Human-readable message summary
 - **`headers`**: Additional custom metadata
 - **`in_reply_to`**: Reference to original message for responses
+- **`workflow_id`**: Reference to the workflow this message belongs to or responds to
 
 **Schema & Validation:**
 - **`schema`**: Schema identifier for payload validation (e.g., "agntcy:commerce.order.v2")
@@ -284,7 +324,20 @@ The following fields MAY be implemented based on specific requirements and use c
 **Advanced Features:**
 - **`coordination`**: Multi-agent workflow configuration
 - **`attachments`**: External file references
-- **`signature`**: Digital signature for non-repudiation
+- **`signature`**: Domain signature providing sender-domain authentication and message integrity (see Section 9.3)
+
+**Signature field semantics:**
+
+- **`signature.algorithm`**: `ES256` or `RS256` (required).
+- **`signature.keyid`**: The DNS selector of the signing key (required for domain signatures). MUST be a single DNS label per Section 3.2.3 — it selects the record `{keyid}._amtpkey.{sender-domain}`. It is not a fully-qualified key name.
+- **`signature.value`**: The signature bytes, base64url (RFC 4648 URL-safe alphabet) without padding (required).
+- The signature object MUST contain exactly the three members `algorithm`, `keyid`, `value`. Unknown or duplicate members make the signature invalid.
+
+**Signed gateway delivery requirements:**
+
+- A gateway-to-gateway delivery carries **exactly one recipient**. When the original message has multiple recipients, the sending gateway fans it out into multiple single-recipient delivery representations, each signed independently. Two representations of the same `message_id`/`idempotency_key` with different `recipients` arrays is expected transport fan-out, not tampering (see Section 9.3.3).
+- A signed delivery MUST explicitly carry `version`, `message_id`, `idempotency_key`, and `timestamp` with valid values. The receiving gateway MUST NOT generate or default any of these fields on behalf of a signed message — doing so would sign data the sender never signed.
+- All protocol fields present on the message — including `workflow_id` — are part of the signed JSON object (Section 9.3.2).
 
 ### 4.3 Message Size Limits
 
@@ -328,10 +381,25 @@ Authorization: Bearer {token} (if required)
 - `200 OK`: **Immediate Path only.** The gateway has obtained a correlated reply within a short processing window and returns the reply payload in the response body. AMTP remains asynchronous at the protocol level; this is an implementation optimization.
 - `202 Accepted`: Message accepted for delivery (either Immediate or Durable Path). Sender MAY poll status or await a reply message referencing `in_reply_to`.
 - `400 Bad Request`: Invalid message format
-- `401 Unauthorized`: Authentication required
+- `401 Unauthorized`: Authentication required. This includes a local-domain sender that did not present an agent API key (`LOCAL_SENDER_AUTH_REQUIRED`).
+- `403 Forbidden`: Sender verification rejected the message under the gateway's `reject` policy — `SIGNATURE_REQUIRED` (unsigned), `SIGNATURE_INVALID` (invalid signature), or `SENDER_CREDENTIAL_MISMATCH` (local sender presented another agent's key).
 - `413 Payload Too Large`: Message exceeds size limit
 - `429 Too Many Requests`: Rate limit exceeded
-- `503 Service Unavailable`: Gateway temporarily unavailable
+- `503 Service Unavailable`: Gateway temporarily unavailable, or the signing key for a remote sender could not be retrieved (`SIGNATURE_KEY_UNAVAILABLE`; retryable).
+
+**Local sender authentication:**
+
+When the `sender` address belongs to the receiving gateway's own domain, the request MUST carry the sender's agent API key:
+
+```http
+Authorization: Bearer {agent_api_key}
+```
+
+The key MUST resolve to an agent whose address matches the `sender` field (case-insensitive local-part and domain comparison). A missing key is rejected with `401 LOCAL_SENDER_AUTH_REQUIRED`; a key belonging to a different agent is rejected with `403 SENDER_CREDENTIAL_MISMATCH`. Local senders are authenticated by their API key, not by a domain signature.
+
+**Remote sender verification:**
+
+When the `sender` domain is remote, the gateway applies its configured verification policy (`accept`, `flag`, or `reject`; default `flag`) to unsigned, invalid, or key-unavailable messages, as specified in Section 9.3.4. Verified messages are accepted and the structured verification result is recorded on the message status.
 
 
 #### 5.2.2 Status Query Endpoint
@@ -351,9 +419,18 @@ Authorization: Bearer {token} (if required)
     }
   ],
   "attempts": 1,
-  "next_retry": null
+  "next_retry": null,
+  "sender_verification": {
+    "result": "verified",
+    "method": "domain_signature",
+    "domain": "sender.com",
+    "keyid": "k1",
+    "algorithm": "ES256"
+  }
 }
 ```
+
+The `sender_verification` member, when present, records how the sender's identity was established for this message (see Section 9.3.4 for the result and method vocabularies). It is absent for messages accepted before verification was recorded.
 
 #### 5.2.3 Inbox Management (Pull Mode)
 
@@ -514,7 +591,7 @@ The originating gateway maintains workflow state:
       "response": {...}
     },
     {
-      "address": "agent2@domain.com", 
+      "address": "agent2@domain.com",
       "status": "pending",
       "deadline": "2025-08-14T11:30:00.000Z"
     }
@@ -628,23 +705,109 @@ Authorization: Bearer oauth-access-token
 **Mutual TLS:**
 Client certificate authentication for high-security environments.
 
-### 9.3 Message Integrity
+#### 9.2.3 Local Sender Authentication
 
-#### 9.3.1 Digital Signatures
+A gateway accepting a message whose `sender` is in the gateway's own domain MUST authenticate the request with the sender's agent API key (Bearer token). The authenticated agent address MUST match the `sender` field (case-insensitive). This is a deliberate anti-spoofing measure: without it, anyone could post messages claiming to be any local agent. See Section 5.2.1 for the error codes.
 
-Optional message signing using RS256:
+### 9.3 Message Integrity and Sender Verification
+
+#### 9.3.1 Overview
+
+AMTP domain signatures provide **sender-domain authentication** and **message integrity** for gateway-to-gateway delivery: the receiving gateway can verify that the message originated from a gateway holding the sender domain's private key and that the content was not modified in transit.
+
+This is domain-origin authentication, not personal non-repudiation: a signing gateway may hold one private key shared by all agents in the domain, so a valid signature proves the domain sent the message, not which agent (or human) within it authored it.
+
+Signing is optional per deployment. A gateway without a configured signing key sends unsigned messages; receiving gateways treat them according to their verification policy (Section 9.3.4).
+
+#### 9.3.2 Signature Input: JCS Canonicalization
+
+The signature is computed over the **complete top-level JSON object of the HTTP request body, with the `signature` member removed**, canonicalized according to **RFC 8785 (JSON Canonicalization Scheme, JCS)**.
+
+Concretely:
+
+1. Parse the raw request body as JSON. The result MUST be a JSON object.
+2. The parsed document MUST satisfy **I-JSON** (RFC 7493) constraints: UTF-8 encoded, no duplicate object member names, and numbers representable as IEEE 754 double precision without loss. Duplicate member names or out-of-range numbers make the signature invalid — different JSON parsers resolve them differently, so no stable canonical form exists.
+3. Remove the top-level `signature` member (if present).
+4. Canonicalize the remaining object with RFC 8785 JCS (lexicographic member ordering by UTF-16 code unit, minimal number serialization, string escaping per RFC 8785 §3.2.2.2).
+5. Sign the canonical bytes.
+
+Because the signature covers the entire object minus `signature`, unknown extension fields are protected — a verifier does not need to know a field's semantics to detect its tampering.
+
+The verifier MUST operate on the raw request body, not on a re-serialization of a bound data structure: re-serializing loses duplicate-key information, number formatting, and unknown fields.
+
+#### 9.3.3 Algorithms and Encodings
+
+**ES256** (recommended):
+- Elliptic curve: NIST P-256 (`secp256r1`), hash SHA-256.
+- Public key in DNS: DER-encoded SubjectPublicKeyInfo (SPKI), base64 (RFC 4648 standard alphabet, with padding).
+- Signature encoding: IEEE P1363 style — the fixed-width 64-byte concatenation `R || S`, each a 32-byte big-endian integer — then base64url (RFC 4648 URL-safe alphabet) **without padding**. ASN.1 DER signatures MUST NOT be used on the wire.
+
+**RS256:**
+- RSA PKCS#1 v1.5 signature with SHA-256. The modulus MUST be at least 2048 bits.
+- Public key in DNS: DER-encoded SubjectPublicKeyInfo, base64 (standard alphabet, with padding).
+- Signature encoding: base64url without padding.
+
+**Signature object:**
 
 ```json
 {
-  "signature": {
-    "algorithm": "RS256",
-    "keyid": "sender.com:key1",
-    "value": "base64-encoded-signature"
-  }
+  "algorithm": "ES256",
+  "keyid": "k1",
+  "value": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 }
 ```
 
-#### 9.3.2 End-to-End Encryption
+- `algorithm`: `ES256` or `RS256`.
+- `keyid`: the DNS selector (Section 3.2.3), a single DNS label.
+- `value`: base64url without padding.
+- Exactly these three members; no unknown or duplicate members.
+
+**Single-recipient fan-out:** gateway-to-gateway delivery carries exactly one recipient. A sending gateway with a multi-recipient message signs and sends one representation per recipient; each representation's `recipients` array contains only that recipient. Receivers MUST accept the same `message_id` arriving with different single-recipient arrays as fan-out, not tampering.
+
+**Relay limitation:** relaying (remote sender → intermediate gateway → remote recipient, with the intermediate gateway re-signing) is NOT supported by this profile. An intermediate gateway MUST NOT re-sign a message with its own domain key while preserving a foreign `sender`; the direct DNS-discovered delivery path is the normative route.
+
+#### 9.3.4 Verification Algorithm and Policy
+
+On receiving a message from a remote sender domain, the gateway:
+
+1. Parses the raw body (size-limited) and validates basic structure: sender/recipient address formats, `version`, and — if the message is signed — the signature object shape and `keyid` selector syntax.
+2. If the sender domain is local: requires the agent API key (Section 9.2.3) and records `authenticated` / `agent_api_key`.
+3. If the sender domain is remote and the message is signed:
+   a. Normalizes the sender domain (strip trailing dot, lowercase).
+   b. Resolves `{keyid}._amtpkey.{sender-domain}` TXT (Section 3.2.3), with caching.
+   c. Checks that exactly one valid `amtpkey1` record exists and its `alg` matches the signature's `algorithm`.
+   d. Canonicalizes the body per Section 9.3.2 and verifies the signature with the record's public key.
+   e. On success records `verified` / `domain_signature`.
+4. If the message is unsigned, or verification fails, records the outcome (`unsigned`, `invalid`, or `key_unavailable`) and applies the configured policy.
+
+**Verification results:**
+
+| Result | Meaning |
+|---|---|
+| `verified` | Domain signature verified successfully |
+| `authenticated` | Local sender authenticated via agent API key |
+| `trusted_internal` | Message generated internally by the gateway (e.g., workflow engine) |
+| `unsigned` | No signature present |
+| `invalid` | Signature present but verification failed (bad crypto, malformed, key mismatch, multiple key records) |
+| `key_unavailable` | Signing key could not be retrieved (DNS failure, no record) |
+
+**Policies for unsigned/invalid/key-unavailable remote messages:**
+
+- `accept`: accept the message and record the result.
+- `flag` (default): accept, record, emit a warning log, and increment a verification metric.
+- `reject`: refuse the message — `unsigned` → `403 SIGNATURE_REQUIRED`; `invalid` → `403 SIGNATURE_INVALID`; `key_unavailable` → `503 SIGNATURE_KEY_UNAVAILABLE` (retryable). Rejected messages are not accepted, so no message status is created; the error response carries the verification result code.
+
+Verification happens **before** any persistence, delivery, or workflow state transition — a forged workflow reply must not be able to advance a state machine before being checked.
+
+#### 9.3.5 Replay and Freshness
+
+A domain signature alone provides no freshness: an attacker who captured a valid signed message can replay it. Replay protection comes from the signed `message_id` + `idempotency_key` combined with the receiving gateway's idempotency deduplication (Section 8.1.1): a replayed signed message hits the idempotency window and is not re-delivered. Tampering with `message_id` or `idempotency_key` breaks the signature and is rejected as `invalid`.
+
+#### 9.3.6 DNS Security Boundary
+
+The public key is discovered via DNS TXT records. Without DNSSEC (or an otherwise trusted resolution path), an on-path attacker who can forge DNS responses can substitute their own key record and impersonate a signing domain. Deployments with strong sender-authentication requirements SHOULD enable DNSSEC on the signing domain and use a validating resolver. TLS on the gateway connection protects the message in transit but does not authenticate the *sender domain* — that binding comes from the DNS-published key.
+
+#### 9.3.7 End-to-End Encryption
 
 Optional payload encryption:
 
@@ -1021,6 +1184,14 @@ Agents register endpoints to receive AMTP messages:
 - `REQUIRED_RESPONSE_MISSING`: Required participant didn't respond
 - `COORDINATION_FAILED`: Multi-agent coordination failed
 
+#### 13.1.4 Sender Verification Errors
+
+- `LOCAL_SENDER_AUTH_REQUIRED`: Local-domain sender did not present an agent API key (401)
+- `SENDER_CREDENTIAL_MISMATCH`: Presented agent API key does not match the sender address (403)
+- `SIGNATURE_REQUIRED`: Message is unsigned and the gateway policy is `reject` (403)
+- `SIGNATURE_INVALID`: Signature verification failed and the gateway policy is `reject` (403)
+- `SIGNATURE_KEY_UNAVAILABLE`: Signing key could not be retrieved from DNS and the gateway policy is `reject` (503, retryable)
+
 ### 13.2 Error Response Format
 
 ```json
@@ -1075,10 +1246,31 @@ Implementations MAY support:
 
 **Advanced Features:**
 - Multi-agent coordination workflows
-- Digital signatures and message integrity
 - End-to-end encryption
 - Webhook notifications
 - Custom headers and metadata
+
+**Domain Signatures Profile:**
+
+Implementations claiming the Domain Signatures profile MUST support:
+
+- Publishing and resolving signing key records (`{selector}._amtpkey.{domain}` TXT, Section 3.2.3)
+- Signing outbound single-recipient deliveries with ES256 or RS256 over the JCS-canonicalized body (Section 9.3.2–9.3.3)
+- Verifying inbound signatures, including the `accept`/`flag`/`reject` policy behavior and the structured `sender_verification` status result (Section 9.3.4)
+- Local sender agent API key enforcement (Section 9.2.3)
+
+**Domain Signatures conformance tests:**
+
+1. **Valid ES256**: a signed message is accepted and recorded as `verified`
+2. **Valid RS256**: same, with an RSA key ≥2048 bits
+3. **Tamper**: modifying any top-level field of a signed message (including unknown extension fields) fails verification
+4. **Unsigned policy**: unsigned remote message is accepted+flagged under `flag`, rejected with `SIGNATURE_REQUIRED` under `reject`
+5. **Invalid policy**: a forged signature is accepted+flagged under `flag`, rejected with `SIGNATURE_INVALID` under `reject`
+6. **Unknown key**: a `keyid` with no DNS record yields `key_unavailable` (503 under `reject`)
+7. **Duplicate JSON key**: a body with duplicate member names fails verification
+8. **Multi-recipient fan-out**: two single-recipient representations of one message both verify
+9. **Workflow reply**: a signed workflow response is verified before any state transition
+10. **Local sender**: a local-domain sender without a matching API key is rejected
 
 ### 14.2 Testing and Validation
 
@@ -1091,6 +1283,7 @@ Standard test suite for validating AMTP implementations:
 3. **Schema Validation Test**: Test schema-based message validation
 4. **Coordination Test**: Multi-agent workflow execution
 5. **Error Handling Test**: Proper error reporting and retry logic
+6. **Domain Signature Test**: Verify signed messages per the Domain Signatures conformance tests (Section 14.1.2)
 
 #### 14.2.2 Performance Benchmarks
 
@@ -1198,7 +1391,7 @@ Standard test suite for validating AMTP implementations:
         "total_price": 2999.00
       },
       {
-        "sku": "GADGET-002", 
+        "sku": "GADGET-002",
         "description": "Smart Gadget",
         "quantity": 50,
         "unit_price": 149.99,
@@ -1224,7 +1417,7 @@ Standard test suite for validating AMTP implementations:
   "sender": "orchestrator@logistics.com",
   "recipients": [
     "warehouse@supplier.com",
-    "shipping@carrier.com", 
+    "shipping@carrier.com",
     "tracking@delivery.com"
   ],
   "subject": "Coordinate Shipment SHIP-789",
@@ -1338,7 +1531,7 @@ hybrid.com. 300 IN MX 10 mail.hybrid.com.
 
 - **Load Balancer**: SSL termination, health checks
 - **Application Server**: AMTP gateway implementation
-- **Message Queue**: Redis/PostgreSQL for persistence  
+- **Message Queue**: Redis/PostgreSQL for persistence
 - **Database**: Message storage and workflow state
 - **Monitoring**: Metrics, logging, alerting
 - **DNS**: TXT record configuration
@@ -1364,7 +1557,7 @@ class FluxAgent:
     def __init__(self, gateway_url, agent_address):
         self.gateway_url = gateway_url
         self.agent_address = agent_address
-    
+
     def send_message(self, recipients, subject, payload, schema=None):
         message = {
             "sender": self.agent_address,
@@ -1373,22 +1566,22 @@ class FluxAgent:
             "payload": payload,
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
-        
+
         if schema:
             message["schema"] = schema
-        
+
         response = requests.post(
             f"{self.gateway_url}/v1/messages",
             json=message,
             headers={"Content-Type": "application/json"}
         )
-        
+
         return response.json()
-    
+
     def handle_incoming_message(self, message):
         # Process incoming AMTP message
         print(f"Received: {message['subject']}")
-        
+
         # Return response if coordination requires it
         if message.get("coordination", {}).get("requires_response"):
             return {
@@ -1417,7 +1610,7 @@ class WorkflowCoordinator:
     def __init__(self, amtp_agent):
         self.amtp_agent = amtp_agent
         self.active_workflows = {}
-    
+
     def start_parallel_workflow(self, recipients, payload, timeout=3600):
         message_id = self.amtp_agent.send_message(
             recipients=recipients,
@@ -1429,29 +1622,29 @@ class WorkflowCoordinator:
                 "required_responses": recipients
             }
         )["message_id"]
-        
+
         self.active_workflows[message_id] = {
             "type": "parallel",
             "recipients": recipients,
             "responses": {},
             "status": "pending"
         }
-        
+
         return message_id
-    
+
     def handle_response(self, response_message):
         workflow_id = response_message["in_reply_to"]
         sender = response_message["sender"]
-        
+
         if workflow_id in self.active_workflows:
             workflow = self.active_workflows[workflow_id]
             workflow["responses"][sender] = response_message["payload"]
-            
+
             # Check if workflow is complete
             if len(workflow["responses"]) == len(workflow["recipients"]):
                 workflow["status"] = "completed"
                 self.on_workflow_complete(workflow_id, workflow)
-    
+
     def on_workflow_complete(self, workflow_id, workflow):
         print(f"Workflow {workflow_id} completed with {len(workflow['responses'])} responses")
 ```
