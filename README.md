@@ -345,6 +345,17 @@ The following fields MAY be implemented based on specific requirements and use c
 - Attachments: Referenced by URL, not embedded
 - Large payloads: Use chunking or external storage
 
+### 4.4 JSON Encoding Requirements
+
+A message body MUST be valid I-JSON (RFC 7493). A receiving gateway MUST reject a body that breaks any of the following rules with `400 Bad Request` and `INVALID_MESSAGE_FORMAT`, whether or not the message is signed:
+
+- The body is exactly one JSON object, with nothing after it.
+- No object contains the same member name twice.
+- No object contains two member names that differ only in case (for example `sender` and `Sender`). Many JSON libraries bind members to fields case-insensitively, so two components of one gateway could otherwise read different senders from the same body.
+- Every number is exactly representable as an IEEE 754 double. Integers above 2^53, or decimals with more precision than a double holds, MUST be sent as strings. A number that would be rounded is rejected, not rounded.
+
+These rules make a body mean the same thing to every reader, which domain signatures (Section 9.3) depend on.
+
 ---
 
 ## 5. Transport Layer
@@ -380,7 +391,7 @@ Authorization: Bearer {token} (if required)
 **Response Codes:**
 - `200 OK`: **Immediate Path only.** The gateway has obtained a correlated reply within a short processing window and returns the reply payload in the response body. AMTP remains asynchronous at the protocol level; this is an implementation optimization.
 - `202 Accepted`: Message accepted for delivery (either Immediate or Durable Path). Sender MAY poll status or await a reply message referencing `in_reply_to`.
-- `400 Bad Request`: Invalid message format
+- `400 Bad Request`: Invalid message format (`INVALID_MESSAGE_FORMAT`), including a body that breaks Section 4.4
 - `401 Unauthorized`: Authentication required. This includes a local-domain sender that did not present an agent API key (`LOCAL_SENDER_AUTH_REQUIRED`).
 - `403 Forbidden`: Sender verification rejected the message: `SIGNATURE_REJECTED` (unsigned or invalid signature under the gateway's `reject` policy), or `SENDER_CREDENTIAL_MISMATCH` (local sender presented another agent's key).
 - `413 Payload Too Large`: Message exceeds size limit
@@ -719,7 +730,7 @@ The signature is computed over the **complete top-level JSON object of the HTTP 
 Concretely:
 
 1. Parse the raw request body as JSON. The result MUST be a JSON object.
-2. The parsed document MUST satisfy **I-JSON** (RFC 7493) constraints: UTF-8 encoded, no duplicate object member names, and numbers representable as IEEE 754 double precision without loss. Duplicate member names or out-of-range numbers make the signature invalid — different JSON parsers resolve them differently, so no stable canonical form exists.
+2. The body MUST satisfy Section 4.4. JCS converts every number to a double, so a number a double cannot represent exactly would let a different value carry the same signature, and duplicate or case-variant members let the verifier and the rest of the gateway read different values. Such a body is rejected with `400 INVALID_MESSAGE_FORMAT` before verification.
 3. Remove the top-level `signature` member (if present).
 4. Canonicalize the remaining object with RFC 8785 JCS (lexicographic member ordering by UTF-16 code unit, minimal number serialization, string escaping per RFC 8785 §3.2.2.2).
 5. Sign the canonical bytes.
@@ -1281,7 +1292,7 @@ Implementations claiming the Domain Signatures profile MUST support:
 4. **Unsigned policy**: unsigned remote message is accepted+flagged under `flag`, rejected with `SIGNATURE_REJECTED` under `reject`
 5. **Invalid policy**: a forged signature is accepted+flagged under `flag`, rejected with `SIGNATURE_REJECTED` under `reject`
 6. **Unknown key**: a `keyid` with no DNS record yields `key_unavailable` (503 under `reject`)
-7. **Duplicate JSON key**: a body with duplicate member names fails verification
+7. **Ambiguous JSON**: a body with duplicate members, members differing only in case, or a number a double cannot represent exactly is rejected with `400 INVALID_MESSAGE_FORMAT`, signed or not
 8. **Multi-recipient fan-out**: two single-recipient representations of one message both verify
 9. **Workflow reply**: a workflow response that is not `verified` or `trusted_internal` does not change workflow state under any policy
 10. **Local sender**: a local-domain sender without a matching API key is rejected
