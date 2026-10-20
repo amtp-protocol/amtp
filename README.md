@@ -116,6 +116,26 @@ _amtp.example.com. IN TXT "v=amtp1;gateway=https://amtp.example.com:443"
 3. Otherwise, fall back to standard MX record lookup for SMTP
 4. Cache discovery results with TTL from DNS record
 
+#### 3.2.3 Signing Key Records
+
+A domain that signs its messages (Section 9.3) publishes each public key as a DNS TXT record at `{keyid}._amtpkey.{domain}`:
+
+```dns
+k1._amtpkey.example.com. IN TXT "v=amtpkey1;alg=ES256;p=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..."
+```
+
+**Parameters** (separated by `;`, each in `name=value` form, surrounding whitespace ignored):
+- `v`: Record version, MUST be `amtpkey1` (required)
+- `alg`: Signature algorithm, `ES256` or `RS256` (required)
+- `p`: The public key as a DER-encoded SubjectPublicKeyInfo, in standard base64 with padding (RFC 4648 Section 4). This is not base64url. (required)
+
+Rules:
+- An `ES256` key MUST be on curve P-256. An `RS256` key MUST have a modulus of at least 2048 bits.
+- Unknown parameters MUST be ignored. A record that repeats a parameter is invalid.
+- `keyid` MUST be a single DNS label: 1 to 63 characters from `a-z`, `0-9` and `-`, not starting or ending with `-`. Upper-case letters are not allowed.
+- A DNS TXT record may be split into several character-strings of at most 255 bytes each. Verifiers MUST concatenate them before parsing. Verifiers MAY ignore records longer than 4096 bytes.
+- Exactly one valid `amtpkey1` record MUST exist at the owner name. Publishing a new key under a new `keyid` allows rotation without overlap problems.
+
 ### 3.3 Gateway Endpoint Resolution
 
 The `gateway` parameter in the DNS TXT record specifies the HTTPS endpoint for AMTP message delivery. The endpoint MUST:
@@ -247,8 +267,9 @@ AMTP messages use JSON format with the following structure:
     }
   ],
   "signature": {
-    "algorithm": "RS256",
-    "value": "base64-encoded-signature"
+    "algorithm": "ES256",
+    "keyid": "k1",
+    "value": "base64url-encoded-signature"
   }
 }
 ```
@@ -284,13 +305,24 @@ The following fields MAY be implemented based on specific requirements and use c
 **Advanced Features:**
 - **`coordination`**: Multi-agent workflow configuration
 - **`attachments`**: External file references
-- **`signature`**: Digital signature for non-repudiation
+- **`signature`**: Domain signature proving the message was sent by the sender's domain (Section 9.3)
 
 ### 4.3 Message Size Limits
 
 - Maximum message size: 10MB (configurable via DNS)
 - Attachments: Referenced by URL, not embedded
 - Large payloads: Use chunking or external storage
+
+### 4.4 JSON Encoding Requirements
+
+A message body MUST be valid I-JSON (RFC 7493). Receiving gateways MUST reject a body that breaks any of the following rules with `400 Bad Request` and `INVALID_MESSAGE_FORMAT`, whether or not the message is signed:
+
+- The body is exactly one JSON object, with nothing after it.
+- No object contains the same member name twice.
+- No object contains two member names that differ only in case (for example `sender` and `Sender`). Many JSON libraries bind members to fields case-insensitively, so two components of one gateway could otherwise read different senders from the same body.
+- Every number is exactly representable as an IEEE 754 double. Integers above 2^53, or decimals with more precision than a double holds, MUST be sent as strings. A number that would be rounded is rejected, not rounded.
+
+These rules make the body mean the same thing to every reader, which domain signatures (Section 9.3) depend on.
 
 ---
 
@@ -329,6 +361,7 @@ Authorization: Bearer {token} (if required)
 - `202 Accepted`: Message accepted for delivery (either Immediate or Durable Path). Sender MAY poll status or await a reply message referencing `in_reply_to`.
 - `400 Bad Request`: Invalid message format
 - `401 Unauthorized`: Authentication required
+- `403 Forbidden`: Message refused by the receiver's signature policy (Section 9.3.5)
 - `413 Payload Too Large`: Message exceeds size limit
 - `429 Too Many Requests`: Rate limit exceeded
 - `503 Service Unavailable`: Gateway temporarily unavailable
@@ -541,6 +574,8 @@ Responses reference the original workflow:
 }
 ```
 
+A response MUST change workflow state only when its sender is authenticated, that is when its verification result (Section 9.3.4) is `verified` or `trusted_internal`. Otherwise anyone who knows a participant's address could complete that participant with their own payload, and the genuine response would then be discarded as a duplicate. A response that is not authenticated MAY still be delivered as an ordinary message.
+
 ---
 
 ## 8. Reliability and Delivery Guarantees
@@ -613,6 +648,8 @@ Failed deliveries generate error reports to sender:
 
 Default authentication uses domain ownership verification through TLS certificates.
 
+TLS authenticates the gateway that makes the connection, not the domain of the `sender` address. A message's sender domain is authenticated by a domain signature (Section 9.3).
+
 #### 9.2.2 Additional Authentication Methods
 
 **API Keys:**
@@ -630,21 +667,112 @@ Client certificate authentication for high-security environments.
 
 ### 9.3 Message Integrity
 
-#### 9.3.1 Digital Signatures
+#### 9.3.1 Domain Signatures
 
-Optional message signing using RS256:
+A gateway signs each message it sends on behalf of its own domain. A receiving gateway checks the signature against a public key published in the sender domain's DNS (Section 3.2.3), in the same way DKIM works for email. A valid signature proves that the domain in the `sender` address sent the message and that the body was not changed after signing. It does not prove which agent in that domain wrote it, and it does not authorize any action.
+
+Signing is OPTIONAL for senders. Receivers choose how to treat unsigned messages (Section 9.3.5).
+
+#### 9.3.2 Signature Object and Signing Input
+
+The signature is carried in the top-level `signature` member:
 
 ```json
 {
   "signature": {
-    "algorithm": "RS256",
-    "keyid": "sender.com:key1",
-    "value": "base64-encoded-signature"
+    "algorithm": "ES256",
+    "keyid": "k1",
+    "value": "base64url-encoded-signature"
   }
 }
 ```
 
-#### 9.3.2 End-to-End Encryption
+- `algorithm`: `ES256` (ECDSA on P-256 with SHA-256) or `RS256` (RSASSA-PKCS1-v1_5 with SHA-256). `ES256` is RECOMMENDED.
+- `keyid`: The DNS label under which the key is published (Section 3.2.3). It is not a domain; the signing domain is always the domain of the `sender` address.
+- `value`: The signature in base64url without padding (RFC 4648 Section 5).
+
+The object MUST contain exactly these three members, each a non-empty string.
+
+The signing input is the complete top-level message object with the `signature` member removed, canonicalized with the JSON Canonicalization Scheme (JCS, RFC 8785) and encoded as UTF-8. Every member is covered, including members this specification does not define, so a receiver can reject any change to the body. The body MUST satisfy Section 4.4; in particular, numbers are compared by their canonical double value, so a number a double cannot represent exactly would let a different value carry the same signature.
+
+#### 9.3.3 Signing
+
+To sign a message, the sending gateway:
+
+1. Builds the exact body it will send, without a `signature` member.
+2. Computes the JCS canonical form of that body and its SHA-256 digest.
+3. Signs the digest with the domain's private key.
+   - `ES256`: the signature is the 64-byte concatenation of R and S, each a 32-byte big-endian integer (the JWS format, RFC 7518 Section 3.4), not DER.
+   - `RS256`: the signature is the RSASSA-PKCS1-v1_5 signature over the digest.
+4. Adds the `signature` member and sends the body.
+
+Requirements:
+- A gateway MUST sign only messages whose sender domain it is responsible for. Domains are compared in lower-case ASCII with any trailing dot removed; internationalized domains MUST be in A-label form.
+- The signature covers the `recipients` array as sent. A gateway that sends separate bodies to different recipients signs each body separately.
+- Retries SHOULD resend the same body and signature.
+- A gateway MUST NOT add its own signature to a message that already carries one, and MUST NOT forward a signed message from another domain. Relaying signed messages is not defined in this version; such a delivery fails with `RELAY_UNSUPPORTED`.
+
+#### 9.3.4 Verification
+
+A receiving gateway verifies a message from a remote sender as follows. Each step that fails ends verification with the result shown.
+
+1. Check the body against Section 4.4 and reject it with `400` if it fails.
+2. Take the domain after the last `@` of `sender`, remove any trailing dot, and lower-case it. If it is not a valid ASCII domain: `invalid`.
+3. If there is no `signature` member: `unsigned`.
+4. If the signature object does not have exactly the members of Section 9.3.2, or `algorithm` is not `ES256` or `RS256`: `invalid`.
+5. If `keyid` is not a valid DNS label (Section 3.2.3): `invalid`. This check MUST happen before any DNS query, so a hostile `keyid` cannot steer resolution.
+6. Query the TXT records at `{keyid}._amtpkey.{domain}`. If the query fails or returns no TXT record: `key_unavailable`.
+7. Parse the records. If there is not exactly one valid `amtpkey1` record: `invalid`.
+8. If the record's `alg` differs from the signature's `algorithm`: `invalid`.
+9. Remove `signature` from the body, compute the JCS canonical form and its SHA-256 digest, and verify `value` against the published key. If it does not verify: `invalid`.
+10. Otherwise: `verified`.
+
+The receiving gateway records the outcome on the message as `sender_verification`, and MUST make it available to recipient agents wherever it delivers or returns the message:
+
+```json
+{
+  "sender_verification": {
+    "result": "verified",
+    "domain": "sender.com",
+    "policy": "flag"
+  }
+}
+```
+
+| Result | Meaning |
+|--------|---------|
+| `verified` | The signature verified against the sender domain's published key |
+| `unsigned` | A remote message with no signature |
+| `invalid` | A signature is present but failed verification, or the key record is malformed or ambiguous |
+| `key_unavailable` | The signing key could not be retrieved from DNS |
+| `trusted_internal` | The sender belongs to the receiving gateway's own domain and was authenticated by that gateway's own credentials, such as an agent API key, or the message was generated by the gateway itself |
+
+`sender_verification` is set by the receiving gateway. A gateway MUST NOT take it from the incoming body.
+
+A message whose sender is in the receiving gateway's own domain MUST NOT be accepted as `trusted_internal` unless the gateway authenticated that sender itself. Otherwise a remote party could claim a local address and be trusted without a signature.
+
+#### 9.3.5 Receiver Policy
+
+Each receiving gateway chooses a policy for remote messages that are not `verified`:
+
+| Policy | `unsigned` | `invalid` | `key_unavailable` |
+|--------|------------|-----------|-------------------|
+| `accept` | Accepted and recorded | Accepted and recorded | Accepted and recorded |
+| `flag` | Accepted, recorded and logged | Accepted, recorded and logged | Accepted, recorded and logged |
+| `reject` | `403`, `SIGNATURE_REJECTED` | `403`, `SIGNATURE_REJECTED` | `503`, `SIGNING_KEY_UNAVAILABLE` |
+
+`key_unavailable` is reported as `503` because DNS failures are usually temporary; the sender SHOULD retry.
+
+Under `accept` and `flag`, an accepted message is not proof of who sent it. Agents that act on a message SHOULD check that `sender_verification.result` is `verified` or `trusted_internal`. Whatever the policy, workflow state follows the rule in Section 7.2.2.
+
+#### 9.3.6 Security Considerations
+
+- **Replay.** The signature covers `message_id`, `idempotency_key` and `timestamp`, but a captured signed message can be sent again. The deduplication required by Section 8.1.1 limits this to the idempotency window; receivers MAY also reject messages whose `timestamp` is too old.
+- **Downgrade.** Under `accept` and `flag`, an attacker can remove the signature and the message is treated as `unsigned`. Only `reject`, or agents that require `verified`, prevent this. This version has no way for a domain to publish that all its messages are signed.
+- **Authorization.** A verified signature proves the sending domain. Deciding what that sender may do is up to the receiver.
+- **Key compromise.** A domain recovers from a leaked key by publishing a new key under a new `keyid` and removing the old record.
+
+#### 9.3.7 End-to-End Encryption
 
 Optional payload encryption:
 
@@ -1006,6 +1134,8 @@ Agents register endpoints to receive AMTP messages:
 - `SCHEMA_VALIDATION_FAILED`: Payload doesn't match specified schema
 - `MESSAGE_TOO_LARGE`: Message exceeds size limits
 - `INVALID_RECIPIENT`: Recipient address format invalid
+- `SIGNATURE_REJECTED`: Message is unsigned or its signature is invalid, and the receiver's policy is `reject` (Section 9.3.5)
+- `SIGNING_KEY_UNAVAILABLE`: The sender domain's signing key could not be retrieved and the receiver's policy is `reject`; retry later
 
 #### 13.1.2 Delivery Errors
 
@@ -1014,6 +1144,7 @@ Agents register endpoints to receive AMTP messages:
 - `AUTHENTICATION_FAILED`: Authentication rejected by recipient
 - `RATE_LIMIT_EXCEEDED`: Too many messages sent
 - `TEMPORARY_FAILURE`: Temporary issue, will retry
+- `RELAY_UNSUPPORTED`: The message carries another domain's signature and cannot be forwarded (Section 9.3.3)
 
 #### 13.1.3 Coordination Errors
 
@@ -1075,7 +1206,7 @@ Implementations MAY support:
 
 **Advanced Features:**
 - Multi-agent coordination workflows
-- Digital signatures and message integrity
+- Domain signatures (Section 9.3)
 - End-to-end encryption
 - Webhook notifications
 - Custom headers and metadata
@@ -1091,6 +1222,7 @@ Standard test suite for validating AMTP implementations:
 3. **Schema Validation Test**: Test schema-based message validation
 4. **Coordination Test**: Multi-agent workflow execution
 5. **Error Handling Test**: Proper error reporting and retry logic
+6. **Domain Signature Test**: Signatures produced by one implementation verify in another, and tampered bodies are rejected
 
 #### 14.2.2 Performance Benchmarks
 
@@ -1104,7 +1236,8 @@ Standard test suite for validating AMTP implementations:
 #### 14.3.1 Threat Model
 
 **Addressed Threats:**
-- Message tampering (TLS, digital signatures)
+- Message tampering (TLS, domain signatures)
+- Sender address spoofing (domain signatures)
 - Unauthorized access (domain authentication, access policies)
 - Denial of service (rate limiting, resource controls)
 - Man-in-the-middle attacks (certificate validation)
@@ -1328,6 +1461,16 @@ _amtp.enterprise.com. 300 IN TXT "v=amtp1;gateway=https://amtp-gw.enterprise.com
 ; AMTP with SMTP bridging
 _amtp.hybrid.com. 300 IN TXT "v=amtp1;gateway=https://amtp.hybrid.com"
 hybrid.com. 300 IN MX 10 mail.hybrid.com.
+```
+
+### B.3 Signing Key Records
+
+```dns
+; ES256 signing key for example.com, selected by keyid "k1"
+k1._amtpkey.example.com. 300 IN TXT "v=amtpkey1;alg=ES256;p=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..."
+
+; Key rotation: publish k2, switch the gateway to k2, then remove k1
+k2._amtpkey.example.com. 300 IN TXT "v=amtpkey1;alg=ES256;p=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..."
 ```
 
 ## Appendix C: Implementation Guidelines
