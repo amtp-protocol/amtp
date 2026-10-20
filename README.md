@@ -382,10 +382,10 @@ Authorization: Bearer {token} (if required)
 - `202 Accepted`: Message accepted for delivery (either Immediate or Durable Path). Sender MAY poll status or await a reply message referencing `in_reply_to`.
 - `400 Bad Request`: Invalid message format
 - `401 Unauthorized`: Authentication required. This includes a local-domain sender that did not present an agent API key (`LOCAL_SENDER_AUTH_REQUIRED`).
-- `403 Forbidden`: Sender verification rejected the message under the gateway's `reject` policy — `SIGNATURE_REQUIRED` (unsigned), `SIGNATURE_INVALID` (invalid signature), or `SENDER_CREDENTIAL_MISMATCH` (local sender presented another agent's key).
+- `403 Forbidden`: Sender verification rejected the message: `SIGNATURE_REJECTED` (unsigned or invalid signature under the gateway's `reject` policy), or `SENDER_CREDENTIAL_MISMATCH` (local sender presented another agent's key).
 - `413 Payload Too Large`: Message exceeds size limit
 - `429 Too Many Requests`: Rate limit exceeded
-- `503 Service Unavailable`: Gateway temporarily unavailable, or the signing key for a remote sender could not be retrieved (`SIGNATURE_KEY_UNAVAILABLE`; retryable).
+- `503 Service Unavailable`: Gateway temporarily unavailable, or the signing key for a remote sender could not be retrieved (`SIGNING_KEY_UNAVAILABLE`; retryable).
 
 **Local sender authentication:**
 
@@ -764,7 +764,7 @@ The verifier MUST operate on the raw request body, not on a re-serialization of 
 
 **Single-recipient fan-out:** gateway-to-gateway delivery carries exactly one recipient. A sending gateway with a multi-recipient message signs and sends one representation per recipient; each representation's `recipients` array contains only that recipient. Receivers MUST accept the same `message_id` arriving with different single-recipient arrays as fan-out, not tampering.
 
-**Relay limitation:** relaying (remote sender → intermediate gateway → remote recipient, with the intermediate gateway re-signing) is NOT supported by this profile. An intermediate gateway MUST NOT re-sign a message with its own domain key while preserving a foreign `sender`; the direct DNS-discovered delivery path is the normative route.
+**Relay limitation:** relaying (remote sender → intermediate gateway → remote recipient, with the intermediate gateway re-signing) is NOT supported by this profile. An intermediate gateway MUST NOT re-sign a message with its own domain key while preserving a foreign `sender`; the direct DNS-discovered delivery path is the normative route. A gateway asked to forward a message that already carries a signature fails the delivery with `RELAY_UNSUPPORTED`.
 
 #### 9.3.4 Verification Algorithm and Policy
 
@@ -795,7 +795,7 @@ On receiving a message from a remote sender domain, the gateway:
 
 - `accept`: accept the message and record the result.
 - `flag` (default): accept, record, emit a warning log, and increment a verification metric.
-- `reject`: refuse the message — `unsigned` → `403 SIGNATURE_REQUIRED`; `invalid` → `403 SIGNATURE_INVALID`; `key_unavailable` → `503 SIGNATURE_KEY_UNAVAILABLE` (retryable). Rejected messages are not accepted, so no message status is created; the error response carries the verification result code.
+- `reject`: refuse the message. `unsigned` and `invalid` → `403 SIGNATURE_REJECTED`, with the error message saying which; `key_unavailable` → `503 SIGNING_KEY_UNAVAILABLE` (retryable). Rejected messages are not accepted, so no message status is created; the error response carries the verification result code.
 
 Verification happens **before** any persistence, delivery, or workflow state transition — a forged workflow reply must not be able to advance a state machine before being checked.
 
@@ -1177,6 +1177,7 @@ Agents register endpoints to receive AMTP messages:
 - `AUTHENTICATION_FAILED`: Authentication rejected by recipient
 - `RATE_LIMIT_EXCEEDED`: Too many messages sent
 - `TEMPORARY_FAILURE`: Temporary issue, will retry
+- `RELAY_UNSUPPORTED`: The message carries another domain's signature and cannot be forwarded (Section 9.3.3)
 
 #### 13.1.3 Coordination Errors
 
@@ -1188,9 +1189,8 @@ Agents register endpoints to receive AMTP messages:
 
 - `LOCAL_SENDER_AUTH_REQUIRED`: Local-domain sender did not present an agent API key (401)
 - `SENDER_CREDENTIAL_MISMATCH`: Presented agent API key does not match the sender address (403)
-- `SIGNATURE_REQUIRED`: Message is unsigned and the gateway policy is `reject` (403)
-- `SIGNATURE_INVALID`: Signature verification failed and the gateway policy is `reject` (403)
-- `SIGNATURE_KEY_UNAVAILABLE`: Signing key could not be retrieved from DNS and the gateway policy is `reject` (503, retryable)
+- `SIGNATURE_REJECTED`: Message is unsigned or its signature failed verification, and the gateway policy is `reject` (403)
+- `SIGNING_KEY_UNAVAILABLE`: Signing key could not be retrieved from DNS and the gateway policy is `reject` (503, retryable)
 
 ### 13.2 Error Response Format
 
@@ -1264,8 +1264,8 @@ Implementations claiming the Domain Signatures profile MUST support:
 1. **Valid ES256**: a signed message is accepted and recorded as `verified`
 2. **Valid RS256**: same, with an RSA key ≥2048 bits
 3. **Tamper**: modifying any top-level field of a signed message (including unknown extension fields) fails verification
-4. **Unsigned policy**: unsigned remote message is accepted+flagged under `flag`, rejected with `SIGNATURE_REQUIRED` under `reject`
-5. **Invalid policy**: a forged signature is accepted+flagged under `flag`, rejected with `SIGNATURE_INVALID` under `reject`
+4. **Unsigned policy**: unsigned remote message is accepted+flagged under `flag`, rejected with `SIGNATURE_REJECTED` under `reject`
+5. **Invalid policy**: a forged signature is accepted+flagged under `flag`, rejected with `SIGNATURE_REJECTED` under `reject`
 6. **Unknown key**: a `keyid` with no DNS record yields `key_unavailable` (503 under `reject`)
 7. **Duplicate JSON key**: a body with duplicate member names fails verification
 8. **Multi-recipient fan-out**: two single-recipient representations of one message both verify
