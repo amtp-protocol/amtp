@@ -828,7 +828,9 @@ Verification happens **before** any persistence, delivery, or workflow state tra
 
 #### 9.3.5 Replay and Freshness
 
-A domain signature alone provides no freshness: an attacker who captured a valid signed message can replay it. Replay protection comes from the signed `message_id` + `idempotency_key` combined with the receiving gateway's idempotency deduplication (Section 8.1.1): a replayed signed message hits the idempotency window and is not re-delivered. Tampering with `message_id` or `idempotency_key` breaks the signature and is rejected as `invalid`.
+A domain signature alone provides no freshness: an attacker who captured a valid signed message can replay it. Changing `message_id`, `idempotency_key` or `timestamp` breaks the signature, so a replay must reuse them, and the receiving gateway's idempotency deduplication (Section 8.1.1) then stops it from being delivered again.
+
+That protection holds only while the original is still within the deduplication window, and only if the window survives gateway restarts and is shared between all replicas of the gateway. Outside the window, a replayed message is accepted again. Receiving gateways MAY therefore also reject signed messages whose `timestamp` is older than their deduplication window, which bounds replay without extra state.
 
 #### 9.3.6 DNS Security Boundary
 
