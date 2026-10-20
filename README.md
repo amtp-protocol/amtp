@@ -609,6 +609,8 @@ Responses reference the original workflow:
 }
 ```
 
+A response MUST change workflow state only when its sender is authenticated, that is when its `sender_verification.result` (Section 9.3.4) is `verified` or `trusted_internal`. This holds under every verification policy. Otherwise anyone who knows a participant's address could complete that participant with their own payload, and the genuine response would then be discarded as a duplicate. A response that is not authenticated MAY still be delivered as an ordinary message.
+
 ---
 
 ## 8. Reliability and Delivery Guarantees
@@ -809,7 +811,7 @@ The gateway MUST include `sender_verification` wherever it hands the message to 
 - `flag` (default): accept, record, emit a warning log, and increment a verification metric.
 - `reject`: refuse the message. `unsigned` and `invalid` → `403 SIGNATURE_REJECTED`, with the error message saying which; `key_unavailable` → `503 SIGNING_KEY_UNAVAILABLE` (retryable). Rejected messages are not stored, so no result is recorded for them.
 
-Verification happens **before** any persistence, delivery, or workflow state transition — a forged workflow reply must not be able to advance a state machine before being checked.
+Verification happens **before** any persistence, delivery, or workflow state transition. Checking first is not enough on its own: under `accept` and `flag`, a message that fails verification is still accepted, so workflow responses are additionally bound by the rule in Section 7.2.2.
 
 #### 9.3.5 Replay and Freshness
 
@@ -1281,7 +1283,7 @@ Implementations claiming the Domain Signatures profile MUST support:
 6. **Unknown key**: a `keyid` with no DNS record yields `key_unavailable` (503 under `reject`)
 7. **Duplicate JSON key**: a body with duplicate member names fails verification
 8. **Multi-recipient fan-out**: two single-recipient representations of one message both verify
-9. **Workflow reply**: a signed workflow response is verified before any state transition
+9. **Workflow reply**: a workflow response that is not `verified` or `trusted_internal` does not change workflow state under any policy
 10. **Local sender**: a local-domain sender without a matching API key is rejected
 
 ### 14.2 Testing and Validation
