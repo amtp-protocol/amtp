@@ -141,8 +141,10 @@ k1._amtpkey.example.com. IN TXT "v=amtpkey1;alg=ES256;p=MFkwEwYHKoZIzj0CAQYIKoZI
 - The sender domain is normalized before comparison and DNS lookup: any trailing dot is removed and ASCII letters are lowercased. Non-ASCII (internationalized) domains are not supported by version 1.0 of this profile.
 
 **Record constraints:**
-- Each owner name MUST have exactly one valid `amtpkey1` TXT record. If the owner has zero valid key records, or more than one (e.g., during a botched rotation), verification of that key fails with `key_unavailable`/`invalid` semantics (Section 9.3.4) — a verifier MUST NOT pick one of several records at random.
-- Unknown parameters MUST be ignored, so that future extensions can add parameters without breaking older verifiers.
+- Each owner name MUST have exactly one valid `amtpkey1` TXT record. A verifier MUST NOT pick one of several records.
+  - If the lookup fails or returns no TXT record, the result is `key_unavailable` (Section 9.3.4), which may be temporary.
+  - If TXT records exist but none is a valid `amtpkey1` record, or more than one is (e.g., during a botched rotation), the result is `invalid`. This is a configuration error on the signing domain, not a transient failure.
+- Unknown parameters MUST be ignored, so that future extensions can add parameters without breaking older verifiers. A record that repeats a parameter is not valid.
 
 **Key rotation:**
 - To rotate, publish the new selector's record (e.g., `k2._amtpkey.example.com`) alongside the old one, sign with the new selector, and remove the old record only after all in-flight messages signed with it have expired (bounded by the receiving gateways' idempotency window). Overlapping publication is safe because each signature names its own selector.
