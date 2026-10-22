@@ -141,8 +141,10 @@ k1._amtpkey.example.com. IN TXT "v=amtpkey1;alg=ES256;p=MFkwEwYHKoZIzj0CAQYIKoZI
 - The sender domain is normalized before comparison and DNS lookup: any trailing dot is removed and ASCII letters are lowercased. Non-ASCII (internationalized) domains are not supported by version 1.0 of this profile.
 
 **Record constraints:**
-- Each owner name MUST have exactly one valid `amtpkey1` TXT record. If the owner has zero valid key records, or more than one (e.g., during a botched rotation), verification of that key fails with `key_unavailable`/`invalid` semantics (Section 9.3.4) — a verifier MUST NOT pick one of several records at random.
-- Unknown parameters MUST be ignored, so that future extensions can add parameters without breaking older verifiers.
+- Each owner name MUST have exactly one valid `amtpkey1` TXT record. A verifier MUST NOT pick one of several records.
+  - If the lookup fails or returns no TXT record, the result is `key_unavailable` (Section 9.3.4), which may be temporary.
+  - If TXT records exist but none is a valid `amtpkey1` record, or more than one is (e.g., during a botched rotation), the result is `invalid`. This is a configuration error on the signing domain, not a transient failure.
+- Unknown parameters MUST be ignored, so that future extensions can add parameters without breaking older verifiers. A record that repeats a parameter is not valid.
 
 **Key rotation:**
 - To rotate, publish the new selector's record (e.g., `k2._amtpkey.example.com`) alongside the old one, sign with the new selector, and remove the old record only after all in-flight messages signed with it have expired (bounded by the receiving gateways' idempotency window). Overlapping publication is safe because each signature names its own selector.
@@ -345,6 +347,17 @@ The following fields MAY be implemented based on specific requirements and use c
 - Attachments: Referenced by URL, not embedded
 - Large payloads: Use chunking or external storage
 
+### 4.4 JSON Encoding Requirements
+
+A message body MUST be valid I-JSON (RFC 7493). A receiving gateway MUST reject a body that breaks any of the following rules with `400 Bad Request` and `INVALID_MESSAGE_FORMAT`, whether or not the message is signed:
+
+- The body is exactly one JSON object, with nothing after it.
+- No object contains the same member name twice.
+- No object contains two member names that differ only in case (for example `sender` and `Sender`). Many JSON libraries bind members to fields case-insensitively, so two components of one gateway could otherwise read different senders from the same body.
+- Every number is exactly representable as an IEEE 754 double. Integers above 2^53, or decimals with more precision than a double holds, MUST be sent as strings. A number that would be rounded is rejected, not rounded.
+
+These rules make a body mean the same thing to every reader, which domain signatures (Section 9.3) depend on.
+
 ---
 
 ## 5. Transport Layer
@@ -380,12 +393,12 @@ Authorization: Bearer {token} (if required)
 **Response Codes:**
 - `200 OK`: **Immediate Path only.** The gateway has obtained a correlated reply within a short processing window and returns the reply payload in the response body. AMTP remains asynchronous at the protocol level; this is an implementation optimization.
 - `202 Accepted`: Message accepted for delivery (either Immediate or Durable Path). Sender MAY poll status or await a reply message referencing `in_reply_to`.
-- `400 Bad Request`: Invalid message format
+- `400 Bad Request`: Invalid message format (`INVALID_MESSAGE_FORMAT`), including a body that breaks Section 4.4
 - `401 Unauthorized`: Authentication required. This includes a local-domain sender that did not present an agent API key (`LOCAL_SENDER_AUTH_REQUIRED`).
-- `403 Forbidden`: Sender verification rejected the message under the gateway's `reject` policy — `SIGNATURE_REQUIRED` (unsigned), `SIGNATURE_INVALID` (invalid signature), or `SENDER_CREDENTIAL_MISMATCH` (local sender presented another agent's key).
+- `403 Forbidden`: Sender verification rejected the message: `SIGNATURE_REJECTED` (unsigned or invalid signature under the gateway's `reject` policy), or `SENDER_CREDENTIAL_MISMATCH` (local sender presented another agent's key).
 - `413 Payload Too Large`: Message exceeds size limit
 - `429 Too Many Requests`: Rate limit exceeded
-- `503 Service Unavailable`: Gateway temporarily unavailable, or the signing key for a remote sender could not be retrieved (`SIGNATURE_KEY_UNAVAILABLE`; retryable).
+- `503 Service Unavailable`: Gateway temporarily unavailable, or the signing key for a remote sender could not be retrieved (`SIGNING_KEY_UNAVAILABLE`; retryable).
 
 **Local sender authentication:**
 
@@ -399,7 +412,7 @@ The key MUST resolve to an agent whose address matches the `sender` field (case-
 
 **Remote sender verification:**
 
-When the `sender` domain is remote, the gateway applies its configured verification policy (`accept`, `flag`, or `reject`; default `flag`) to unsigned, invalid, or key-unavailable messages, as specified in Section 9.3.4. Verified messages are accepted and the structured verification result is recorded on the message status.
+When the `sender` domain is remote, the gateway applies its configured verification policy (`accept`, `flag`, or `reject`; default `flag`) to unsigned, invalid, or key-unavailable messages, as specified in Section 9.3.4. Verified messages are accepted. Either way, the verification result is recorded on the message (Section 9.3.4).
 
 
 #### 5.2.2 Status Query Endpoint
@@ -419,18 +432,9 @@ When the `sender` domain is remote, the gateway applies its configured verificat
     }
   ],
   "attempts": 1,
-  "next_retry": null,
-  "sender_verification": {
-    "result": "verified",
-    "method": "domain_signature",
-    "domain": "sender.com",
-    "keyid": "k1",
-    "algorithm": "ES256"
-  }
+  "next_retry": null
 }
 ```
-
-The `sender_verification` member, when present, records how the sender's identity was established for this message (see Section 9.3.4 for the result and method vocabularies). It is absent for messages accepted before verification was recorded.
 
 #### 5.2.3 Inbox Management (Pull Mode)
 
@@ -618,6 +622,8 @@ Responses reference the original workflow:
 }
 ```
 
+A response MUST change workflow state only when its sender is authenticated, that is when its `sender_verification.result` (Section 9.3.4) is `verified` or `trusted_internal`. This holds under every verification policy. Otherwise anyone who knows a participant's address could complete that participant with their own payload, and the genuine response would then be discarded as a duplicate. A response that is not authenticated MAY still be delivered as an ordinary message.
+
 ---
 
 ## 8. Reliability and Delivery Guarantees
@@ -726,7 +732,7 @@ The signature is computed over the **complete top-level JSON object of the HTTP 
 Concretely:
 
 1. Parse the raw request body as JSON. The result MUST be a JSON object.
-2. The parsed document MUST satisfy **I-JSON** (RFC 7493) constraints: UTF-8 encoded, no duplicate object member names, and numbers representable as IEEE 754 double precision without loss. Duplicate member names or out-of-range numbers make the signature invalid — different JSON parsers resolve them differently, so no stable canonical form exists.
+2. The body MUST satisfy Section 4.4. JCS converts every number to a double, so a number a double cannot represent exactly would let a different value carry the same signature, and duplicate or case-variant members let the verifier and the rest of the gateway read different values. Such a body is rejected with `400 INVALID_MESSAGE_FORMAT` before verification.
 3. Remove the top-level `signature` member (if present).
 4. Canonicalize the remaining object with RFC 8785 JCS (lexicographic member ordering by UTF-16 code unit, minimal number serialization, string escaping per RFC 8785 §3.2.2.2).
 5. Sign the canonical bytes.
@@ -764,20 +770,20 @@ The verifier MUST operate on the raw request body, not on a re-serialization of 
 
 **Single-recipient fan-out:** gateway-to-gateway delivery carries exactly one recipient. A sending gateway with a multi-recipient message signs and sends one representation per recipient; each representation's `recipients` array contains only that recipient. Receivers MUST accept the same `message_id` arriving with different single-recipient arrays as fan-out, not tampering.
 
-**Relay limitation:** relaying (remote sender → intermediate gateway → remote recipient, with the intermediate gateway re-signing) is NOT supported by this profile. An intermediate gateway MUST NOT re-sign a message with its own domain key while preserving a foreign `sender`; the direct DNS-discovered delivery path is the normative route.
+**Relay limitation:** relaying (remote sender → intermediate gateway → remote recipient, with the intermediate gateway re-signing) is NOT supported by this profile. An intermediate gateway MUST NOT re-sign a message with its own domain key while preserving a foreign `sender`; the direct DNS-discovered delivery path is the normative route. A gateway asked to forward a message that already carries a signature fails the delivery with `RELAY_UNSUPPORTED`.
 
 #### 9.3.4 Verification Algorithm and Policy
 
 On receiving a message from a remote sender domain, the gateway:
 
 1. Parses the raw body (size-limited) and validates basic structure: sender/recipient address formats, `version`, and — if the message is signed — the signature object shape and `keyid` selector syntax.
-2. If the sender domain is local: requires the agent API key (Section 9.2.3) and records `authenticated` / `agent_api_key`.
+2. If the sender domain is local: requires the agent API key (Section 9.2.3) and records `trusted_internal`.
 3. If the sender domain is remote and the message is signed:
    a. Normalizes the sender domain (strip trailing dot, lowercase).
    b. Resolves `{keyid}._amtpkey.{sender-domain}` TXT (Section 3.2.3), with caching.
    c. Checks that exactly one valid `amtpkey1` record exists and its `alg` matches the signature's `algorithm`.
    d. Canonicalizes the body per Section 9.3.2 and verifies the signature with the record's public key.
-   e. On success records `verified` / `domain_signature`.
+   e. On success records `verified`.
 4. If the message is unsigned, or verification fails, records the outcome (`unsigned`, `invalid`, or `key_unavailable`) and applies the configured policy.
 
 **Verification results:**
@@ -785,23 +791,46 @@ On receiving a message from a remote sender domain, the gateway:
 | Result | Meaning |
 |---|---|
 | `verified` | Domain signature verified successfully |
-| `authenticated` | Local sender authenticated via agent API key |
-| `trusted_internal` | Message generated internally by the gateway (e.g., workflow engine) |
+| `trusted_internal` | Local sender authenticated by the gateway with its agent API key, or message generated by the gateway itself (e.g., workflow engine) |
 | `unsigned` | No signature present |
 | `invalid` | Signature present but verification failed (bad crypto, malformed, key mismatch, multiple key records) |
 | `key_unavailable` | Signing key could not be retrieved (DNS failure, no record) |
+
+**Recording the result:**
+
+The receiving gateway records the result on the message as `sender_verification`:
+
+```json
+{
+  "sender_verification": {
+    "result": "unsigned",
+    "domain": "sender.com",
+    "policy": "flag",
+    "reason": "no signature member"
+  }
+}
+```
+
+- `result`: one of the results above (required).
+- `domain`: the normalized sender domain, or the gateway's own domain for `trusted_internal`.
+- `policy`: the verification policy in effect when the message was accepted.
+- `reason`: a short diagnostic for results other than `verified` (optional).
+
+The gateway MUST include `sender_verification` wherever it hands the message to a recipient agent: message retrieval, inbox listings, and push delivery. The recipient is the party that decides whether to trust the sender, so it needs the result with the message rather than through a separate status query. The gateway sets this member itself and MUST NOT take it from the incoming request body.
 
 **Policies for unsigned/invalid/key-unavailable remote messages:**
 
 - `accept`: accept the message and record the result.
 - `flag` (default): accept, record, emit a warning log, and increment a verification metric.
-- `reject`: refuse the message — `unsigned` → `403 SIGNATURE_REQUIRED`; `invalid` → `403 SIGNATURE_INVALID`; `key_unavailable` → `503 SIGNATURE_KEY_UNAVAILABLE` (retryable). Rejected messages are not accepted, so no message status is created; the error response carries the verification result code.
+- `reject`: refuse the message. `unsigned` and `invalid` → `403 SIGNATURE_REJECTED`, with the error message saying which; `key_unavailable` → `503 SIGNING_KEY_UNAVAILABLE` (retryable). Rejected messages are not stored, so no result is recorded for them.
 
-Verification happens **before** any persistence, delivery, or workflow state transition — a forged workflow reply must not be able to advance a state machine before being checked.
+Verification happens **before** any persistence, delivery, or workflow state transition. Checking first is not enough on its own: under `accept` and `flag`, a message that fails verification is still accepted, so workflow responses are additionally bound by the rule in Section 7.2.2.
 
 #### 9.3.5 Replay and Freshness
 
-A domain signature alone provides no freshness: an attacker who captured a valid signed message can replay it. Replay protection comes from the signed `message_id` + `idempotency_key` combined with the receiving gateway's idempotency deduplication (Section 8.1.1): a replayed signed message hits the idempotency window and is not re-delivered. Tampering with `message_id` or `idempotency_key` breaks the signature and is rejected as `invalid`.
+A domain signature alone provides no freshness: an attacker who captured a valid signed message can replay it. Changing `message_id`, `idempotency_key` or `timestamp` breaks the signature, so a replay must reuse them, and the receiving gateway's idempotency deduplication (Section 8.1.1) then stops it from being delivered again.
+
+That protection holds only while the original is still within the deduplication window, and only if the window survives gateway restarts and is shared between all replicas of the gateway. Outside the window, a replayed message is accepted again. Receiving gateways MAY therefore also reject signed messages whose `timestamp` is older than their deduplication window, which bounds replay without extra state.
 
 #### 9.3.6 DNS Security Boundary
 
@@ -1177,6 +1206,7 @@ Agents register endpoints to receive AMTP messages:
 - `AUTHENTICATION_FAILED`: Authentication rejected by recipient
 - `RATE_LIMIT_EXCEEDED`: Too many messages sent
 - `TEMPORARY_FAILURE`: Temporary issue, will retry
+- `RELAY_UNSUPPORTED`: The message carries another domain's signature and cannot be forwarded (Section 9.3.3)
 
 #### 13.1.3 Coordination Errors
 
@@ -1188,9 +1218,8 @@ Agents register endpoints to receive AMTP messages:
 
 - `LOCAL_SENDER_AUTH_REQUIRED`: Local-domain sender did not present an agent API key (401)
 - `SENDER_CREDENTIAL_MISMATCH`: Presented agent API key does not match the sender address (403)
-- `SIGNATURE_REQUIRED`: Message is unsigned and the gateway policy is `reject` (403)
-- `SIGNATURE_INVALID`: Signature verification failed and the gateway policy is `reject` (403)
-- `SIGNATURE_KEY_UNAVAILABLE`: Signing key could not be retrieved from DNS and the gateway policy is `reject` (503, retryable)
+- `SIGNATURE_REJECTED`: Message is unsigned or its signature failed verification, and the gateway policy is `reject` (403)
+- `SIGNING_KEY_UNAVAILABLE`: Signing key could not be retrieved from DNS and the gateway policy is `reject` (503, retryable)
 
 ### 13.2 Error Response Format
 
@@ -1256,7 +1285,7 @@ Implementations claiming the Domain Signatures profile MUST support:
 
 - Publishing and resolving signing key records (`{selector}._amtpkey.{domain}` TXT, Section 3.2.3)
 - Signing outbound single-recipient deliveries with ES256 or RS256 over the JCS-canonicalized body (Section 9.3.2–9.3.3)
-- Verifying inbound signatures, including the `accept`/`flag`/`reject` policy behavior and the structured `sender_verification` status result (Section 9.3.4)
+- Verifying inbound signatures, including the `accept`/`flag`/`reject` policy behavior and the `sender_verification` result recorded on the message (Section 9.3.4)
 - Local sender agent API key enforcement (Section 9.2.3)
 
 **Domain Signatures conformance tests:**
@@ -1264,12 +1293,12 @@ Implementations claiming the Domain Signatures profile MUST support:
 1. **Valid ES256**: a signed message is accepted and recorded as `verified`
 2. **Valid RS256**: same, with an RSA key ≥2048 bits
 3. **Tamper**: modifying any top-level field of a signed message (including unknown extension fields) fails verification
-4. **Unsigned policy**: unsigned remote message is accepted+flagged under `flag`, rejected with `SIGNATURE_REQUIRED` under `reject`
-5. **Invalid policy**: a forged signature is accepted+flagged under `flag`, rejected with `SIGNATURE_INVALID` under `reject`
+4. **Unsigned policy**: unsigned remote message is accepted+flagged under `flag`, rejected with `SIGNATURE_REJECTED` under `reject`
+5. **Invalid policy**: a forged signature is accepted+flagged under `flag`, rejected with `SIGNATURE_REJECTED` under `reject`
 6. **Unknown key**: a `keyid` with no DNS record yields `key_unavailable` (503 under `reject`)
-7. **Duplicate JSON key**: a body with duplicate member names fails verification
+7. **Ambiguous JSON**: a body with duplicate members, members differing only in case, or a number a double cannot represent exactly is rejected with `400 INVALID_MESSAGE_FORMAT`, signed or not
 8. **Multi-recipient fan-out**: two single-recipient representations of one message both verify
-9. **Workflow reply**: a signed workflow response is verified before any state transition
+9. **Workflow reply**: a workflow response that is not `verified` or `trusted_internal` does not change workflow state under any policy
 10. **Local sender**: a local-domain sender without a matching API key is rejected
 
 ### 14.2 Testing and Validation
